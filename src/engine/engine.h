@@ -31,6 +31,7 @@ struct SegmentRule {
 struct Candidate {
   std::string regex;                 // anchored, e.g. "^PN\\d{4}@BN\\d{4}@...$"
   std::vector<SegmentRule> segments; // in order, concatenation equals the regex
+  std::string variant;               // "exact" | "relaxed" | "broadened" (工单 06)
 };
 
 // Segmentation configuration (工单 05). Defaults = fully automatic.
@@ -71,8 +72,10 @@ struct CandidateVerdict {
 };
 
 struct GenerationResult {
-  std::vector<CandidateVerdict> candidates;
-  std::vector<std::string> warnings;  // input-hygiene warnings (工单 04)
+  std::vector<CandidateVerdict> candidates;  // passing first (recommended first); when
+                                             // none pass, the closest failing ones (工单 09)
+  std::vector<std::string> warnings;         // input-hygiene warnings (工单 04)
+  bool has_passing = false;                  // whether any candidate passes all examples
 };
 
 // Generate candidates from the project and validate each against every example.

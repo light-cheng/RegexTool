@@ -344,6 +344,8 @@ std::string compose_regex(const std::vector<SegmentRule>& segments) {
       out += seg.field.charset;
       if (seg.field.min_len == 1 && seg.field.max_len == 1) {
         // bare class, e.g. \d — {1} would be noise
+      } else if (seg.field.max_len == SIZE_MAX) {
+        out += "{" + std::to_string(seg.field.min_len) + ",}";  // relaxed length
       } else if (seg.field.min_len == seg.field.max_len) {
         out += "{" + std::to_string(seg.field.min_len) + "}";
       } else {
@@ -353,6 +355,17 @@ std::string compose_regex(const std::vector<SegmentRule>& segments) {
   }
   out += "$";
   return out;
+}
+
+// Broaden an observed-only charset for the "broadened" variant (工单 06).
+std::string widen_charset(const std::string& cs) {
+  if (cs == "\\d" || cs == "[0-9]") return "[A-Z0-9]";
+  if (cs == "[A-Z]") return "[A-Za-z0-9]";
+  if (cs == "[a-z]") return "[A-Za-z0-9]";
+  if (cs == "[A-Za-z]") return "[A-Za-z0-9]";
+  if (cs == "[A-Z0-9]") return "[A-Za-z0-9]";
+  if (cs == "[a-z0-9]") return "[A-Za-z0-9]";
+  return cs;  // custom class or already maximal
 }
 
 // Walk one example against the segment model: authoritative full-match plus a
@@ -434,29 +447,79 @@ GenerationResult generate(const Project& project) {
   segments = normalize_segments(std::move(segments));
   apply_overrides(segments, cfg.field_overrides);
 
-  Candidate candidate;
-  candidate.segments = std::move(segments);
-  candidate.regex = compose_regex(candidate.segments);
+  Candidate base;
+  base.variant = "exact";
+  base.segments = std::move(segments);
+  base.regex = compose_regex(base.segments);
 
-  CandidateVerdict vd;
-  vd.candidate = std::move(candidate);
+  // Variant axes (工单 06): length exactness and charset tightness.
+  struct VariantSpec {
+    const char* name;
+    bool relax_lengths;
+    bool broaden_charsets;
+  };
+  const VariantSpec kVariants[] = {
+      {"exact", false, false},
+      {"relaxed", true, false},
+      {"broadened", false, true},
+  };
 
-  for (const auto& s : cleaned) {
-    vd.positive_verdicts.push_back(walk_verify(vd.candidate, s));
+  auto fill_verdicts = [&](CandidateVerdict& vd) {
+    for (const auto& s : cleaned) {
+      vd.positive_verdicts.push_back(walk_verify(vd.candidate, s));
+    }
+    for (const auto& s : project.negatives) {
+      auto v = walk_verify(vd.candidate, s);
+      v.passed = !v.matched;  // negative polarity: correctly rejected = passed
+      vd.negative_verdicts.push_back(std::move(v));
+    }
+    std::size_t failures = 0;
+    for (const auto& v : vd.positive_verdicts) if (!v.passed) ++failures;
+    for (const auto& v : vd.negative_verdicts) if (!v.passed) ++failures;
+    vd.failures = failures;
+    vd.passes_all = failures == 0;
+  };
+
+  std::vector<CandidateVerdict> passing;
+  std::vector<CandidateVerdict> failing;
+  for (const auto& spec : kVariants) {
+    CandidateVerdict vd;
+    vd.candidate = base;
+    vd.candidate.variant = spec.name;
+    if (spec.relax_lengths || spec.broaden_charsets) {
+      for (auto& seg : vd.candidate.segments) {
+        if (seg.is_literal) continue;
+        if (spec.relax_lengths && seg.field.min_len == seg.field.max_len) {
+          seg.field.max_len = SIZE_MAX;  // {n,}
+        }
+        if (spec.broaden_charsets) seg.field.charset = widen_charset(seg.field.charset);
+      }
+      vd.candidate.regex = compose_regex(vd.candidate.segments);
+    }
+    fill_verdicts(vd);
+    (vd.passes_all ? passing : failing).push_back(std::move(vd));
   }
-  for (const auto& s : project.negatives) {
-    auto v = walk_verify(vd.candidate, s);
-    v.passed = !v.matched;  // negative polarity: correctly rejected = passed
-    vd.negative_verdicts.push_back(std::move(v));
+
+  // Simpler first: shorter regex wins, then the stricter variant.
+  auto simpler = [](const CandidateVerdict& a, const CandidateVerdict& b) {
+    if (a.candidate.regex.size() != b.candidate.regex.size()) {
+      return a.candidate.regex.size() < b.candidate.regex.size();
+    }
+    return a.candidate.variant < b.candidate.variant;
+  };
+  auto closer = [&](const CandidateVerdict& a, const CandidateVerdict& b) {
+    if (a.failures != b.failures) return a.failures < b.failures;
+    return simpler(a, b);
+  };
+  std::sort(passing.begin(), passing.end(), simpler);
+  std::sort(failing.begin(), failing.end(), closer);
+
+  result.has_passing = !passing.empty();
+  if (!passing.empty()) {
+    result.candidates = std::move(passing);  // recommended candidate first
+  } else {
+    result.candidates = std::move(failing);  // 工单 09: closest candidates, no silent empty
   }
-
-  std::size_t failures = 0;
-  for (const auto& v : vd.positive_verdicts) if (!v.passed) ++failures;
-  for (const auto& v : vd.negative_verdicts) if (!v.passed) ++failures;
-  vd.failures = failures;
-  vd.passes_all = failures == 0;
-
-  result.candidates.push_back(std::move(vd));
   return result;
 }
 

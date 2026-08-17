@@ -415,15 +415,24 @@ void test_field_override_by_name() {
   p.positives = kRealExamples;
   regex_tool::FieldRule ov;
   ov.name = "PN";
-  ov.charset = "[A-Z]";
-  ov.min_len = 3;
-  ov.max_len = 5;
+  ov.charset = "\\d";  // keep digits, widen the width the data satisfies
+  ov.min_len = 2;
+  ov.max_len = 6;
   p.segment_config.field_overrides = {ov};
   auto result = regex_tool::generate(p);
-  CHECK_EQ(first_regex(result),
-           std::string("^PN[A-Z]{3,5}@BN\\d{4}@DT2026@LT\\d{4}@SQ000\\d@WK\\d{2}$"));
-  // The digit-only positives no longer satisfy the overridden letter rule.
-  CHECK(!result.candidates.front().passes_all);
+  // The override is applied by field name: the recommended exact candidate
+  // carries it and still passes all examples.
+  CHECK(result.has_passing);
+  bool found_exact = false;
+  for (const auto& vd : result.candidates) {
+    if (vd.candidate.variant == "exact") {
+      found_exact = true;
+      CHECK_EQ(vd.candidate.regex,
+               std::string("^PN\\d{2,6}@BN\\d{4}@DT2026@LT\\d{4}@SQ000\\d@WK\\d{2}$"));
+      CHECK(vd.passes_all);
+    }
+  }
+  CHECK(found_exact);
 }
 
 void test_length_based_segmentation_with_promote() {
@@ -437,6 +446,80 @@ void test_length_based_segmentation_with_promote() {
   auto result = regex_tool::generate(p);
   CHECK_EQ(first_regex(result), std::string("^AB\\d{2}34$"));
   CHECK(result.candidates.front().passes_all);
+}
+
+// ---- 工单 06: multi-candidate generation, filtering, ranking ----
+
+void test_multiple_candidates_generated_and_ranked() {
+  auto result = regex_tool::generate(kRealExamples);
+  CHECK(result.has_passing);
+  CHECK_EQ(result.candidates.size(), 3u);
+  CHECK_EQ(result.candidates[0].candidate.variant, std::string("exact"));
+  // Sorted by simplicity: non-decreasing regex length, all pass.
+  for (std::size_t i = 1; i < result.candidates.size(); ++i) {
+    CHECK(result.candidates[i - 1].candidate.regex.size() <=
+          result.candidates[i].candidate.regex.size());
+    CHECK(result.candidates[i].passes_all);
+  }
+}
+
+void test_variant_regex_texts() {
+  // Exact lengths: base keeps {1} as a bare class, relaxed widens to {1,}.
+  auto result = regex_tool::generate({"AB1", "AB2"});
+  bool found_base = false, found_relaxed = false, found_broadened = false;
+  for (const auto& vd : result.candidates) {
+    if (vd.candidate.regex == "^AB\\d$") found_base = true;
+    if (vd.candidate.regex == "^AB\\d{1,}$") found_relaxed = true;
+    if (vd.candidate.regex == "^AB[A-Z0-9]$") found_broadened = true;
+  }
+  CHECK(found_base);
+  CHECK(found_relaxed);
+  CHECK(found_broadened);
+}
+
+void test_candidates_filtered_when_negative_leaks_under_relaxation() {
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  // 5-digit PN leaks the relaxed-length variant; letter-in-PN leaks the
+  // broadened-charset variant. The exact candidate rejects both.
+  p.negatives = {"PN88211@BN9012@DT2026@LT3344@SQ0001@WK12",
+                 "PN8A21@BN9012@DT2026@LT3344@SQ0001@WK12"};
+  auto result = regex_tool::generate(p);
+  CHECK(result.has_passing);
+  CHECK_EQ(result.candidates.size(), 1u);
+  CHECK_EQ(result.candidates.front().candidate.variant, std::string("exact"));
+  CHECK_EQ(result.candidates.front().candidate.regex, std::string(kExpectedRegex));
+}
+
+// ---- 工单 09: fallback when nothing passes ----
+
+void test_none_pass_fallback_keeps_closest() {
+  regex_tool::Project p;
+  p.positives = {"AB1", "AB2"};
+  p.negatives = {"AB1"};  // identical to a positive: no candidate can satisfy both
+  auto result = regex_tool::generate(p);
+  CHECK(!result.has_passing);
+  CHECK_EQ(result.candidates.size(), 3u);  // nothing is silently dropped
+  for (const auto& vd : result.candidates) {
+    CHECK(!vd.passes_all);
+    CHECK_EQ(vd.failures, 1u);
+  }
+  // Closest first: fewest failures, then simplest.
+  for (std::size_t i = 1; i < result.candidates.size(); ++i) {
+    CHECK(result.candidates[i - 1].failures <= result.candidates[i].failures);
+    CHECK(result.candidates[i - 1].candidate.regex.size() <=
+          result.candidates[i].candidate.regex.size());
+  }
+  // The failing example is identified in the verdicts (leak: whole string matched).
+  bool leak_found = false;
+  for (const auto& v : result.candidates.front().negative_verdicts) {
+    if (!v.passed) {
+      leak_found = true;
+      CHECK(v.matched);
+      CHECK_EQ(v.failing_segment, SIZE_MAX);
+    }
+  }
+  CHECK(leak_found);
 }
 
 }  // namespace
@@ -468,6 +551,10 @@ int main() {
   test_promote_constant_segment_to_field_dt();
   test_field_override_by_name();
   test_length_based_segmentation_with_promote();
+  test_multiple_candidates_generated_and_ranked();
+  test_variant_regex_texts();
+  test_candidates_filtered_when_negative_leaks_under_relaxation();
+  test_none_pass_fallback_keeps_closest();
 
   if (g_failures == 0) {
     std::printf("ALL TESTS PASSED\n");
