@@ -38,6 +38,8 @@ struct Candidate {
 struct SegmentConfig {
   bool use_lengths = false;                 // manual length-based segmentation
   std::vector<std::size_t> lengths;         // chunk sizes when use_lengths
+  bool use_separators = false;              // explicit separator(s) segmentation
+  std::vector<std::string> separators;      // one or more separators, e.g. {"@"} or {"@", "|"}
   std::vector<std::string> promote_tags;    // literals whose tag is listed become fields
   std::vector<FieldRule> field_overrides;   // override inferred field rules, keyed by name
 };

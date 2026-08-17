@@ -32,12 +32,16 @@ constexpr int IDC_GENERATE = 1011;
 constexpr int IDC_SELFTEST_EDIT = 1012;
 constexpr int IDC_SELFTEST_BTN = 1013;
 constexpr int IDC_RESULT_EDIT = 1014;
+constexpr int IDC_SEG_COUNT_COMBO = 1015;
+constexpr int IDC_SEP_EDIT = 1016;
+constexpr int IDC_MODE_SEP = 1017;
 constexpr int IDC_POS_EDIT_BASE = 2000;
 constexpr int IDC_POS_DEL_BASE = 3000;
 constexpr int IDC_NEG_EDIT_BASE = 4000;
 constexpr int IDC_NEG_DEL_BASE = 5000;
 constexpr int IDC_SEG_EDIT_BASE = 6000;
 constexpr int IDC_SEG_PROMOTE_BASE = 7000;
+constexpr int IDC_LEN_BASE = 8000;
 
 constexpr int LEFT = 8;
 constexpr int EDIT_W = 330;
@@ -45,17 +49,21 @@ constexpr int DEL_W = 28;
 constexpr int ROW_H = 28;
 constexpr int CTRL_H = 22;
 constexpr int RIGHT_X = 486;
+constexpr std::size_t LEN_PER_LINE = 5;  // per-segment length boxes per row
 
 HWND g_main_hwnd = nullptr;
 
 struct AppState {
-  HWND project_edit = nullptr;
+  HWND project_combo = nullptr;
   HWND new_btn = nullptr, save_btn = nullptr, load_btn = nullptr;
-  HWND pos_label = nullptr, neg_label = nullptr, cfg_label = nullptr, len_label = nullptr;
+  HWND pos_label = nullptr, neg_label = nullptr, cfg_label = nullptr, sep_label = nullptr, count_label = nullptr;
   std::vector<HWND> pos_edits, pos_dels;
   std::vector<HWND> neg_edits, neg_dels;
   HWND add_pos = nullptr, add_neg = nullptr, batch_pos = nullptr, batch_neg = nullptr;
-  HWND mode_auto = nullptr, mode_len = nullptr, lengths_edit = nullptr;
+  HWND mode_auto = nullptr, mode_sep = nullptr, mode_len = nullptr;
+  HWND sep_edit = nullptr;
+  HWND seg_count_combo = nullptr;
+  std::vector<HWND> length_boxes;
   HWND generate_btn = nullptr;
   HWND result_edit = nullptr;
   HWND selftest_edit = nullptr, selftest_btn = nullptr, selftest_label = nullptr;
@@ -131,6 +139,17 @@ HWND make_edit(HWND parent, int id, int x, int y, int w, int h, DWORD extra_styl
   return edit;
 }
 
+HWND make_combo(HWND parent, int id, int x, int y, int w, int h, bool editable) {
+  HWND cb = CreateWindowExW(0, L"COMBOBOX", L"",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                (editable ? CBS_DROPDOWN : CBS_DROPDOWNLIST) | WS_VSCROLL,
+                            x, y, w, h, parent,
+                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                            GetModuleHandleW(nullptr), nullptr);
+  SendMessageW(cb, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+  return cb;
+}
+
 HWND make_radio(HWND parent, const wchar_t* text, int id, int x, int y, int w, int h, bool first) {
   HWND btn = CreateWindowExW(0, L"BUTTON", text,
                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON |
@@ -145,12 +164,26 @@ HWND make_radio(HWND parent, const wchar_t* text, int id, int x, int y, int w, i
 // Layout positions every control; also refreshes the vertical scroll range.
 void layout(HWND hwnd);
 
+// Next free control id in the given base range: ids are never reused, so a
+// deleted row's ids are not handed out again (deletion locates rows by handle).
+int next_free_id(int base) {
+  int best = base;
+  auto scan = [&](const std::vector<HWND>& hs) {
+    for (HWND h : hs) {
+      int id = static_cast<int>(GetDlgCtrlID(h));
+      if (id >= base && id < base + 1000 && id >= best) best = id + 1;
+    }
+  };
+  scan(g.pos_edits);
+  scan(g.neg_edits);
+  return best;
+}
+
 void add_example_row(HWND hwnd, bool negative) {
   auto& edits = negative ? g.neg_edits : g.pos_edits;
   auto& dels = negative ? g.neg_dels : g.pos_dels;
-  size_t i = edits.size();
-  int edit_id = (negative ? IDC_NEG_EDIT_BASE : IDC_POS_EDIT_BASE) + static_cast<int>(i);
-  int del_id = (negative ? IDC_NEG_DEL_BASE : IDC_POS_DEL_BASE) + static_cast<int>(i);
+  int edit_id = next_free_id(negative ? IDC_NEG_EDIT_BASE : IDC_POS_EDIT_BASE);
+  int del_id = next_free_id(negative ? IDC_NEG_DEL_BASE : IDC_POS_DEL_BASE);
   HWND edit = make_edit(hwnd, edit_id, LEFT, 0, EDIT_W, CTRL_H, 0);
   HWND del = make_button(hwnd, L"\u00d7", del_id, 0, 0, DEL_W, CTRL_H);  // ×
   edits.push_back(edit);
@@ -357,21 +390,59 @@ bool is_mode_lengths() {
   return SendMessageW(g.mode_len, BM_GETCHECK, 0, 0) == BST_CHECKED;
 }
 
-std::vector<std::size_t> parse_lengths(const std::wstring& text) {
+bool is_mode_separators() {
+  return SendMessageW(g.mode_sep, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+// 0 = auto, 1 = separators, 2 = lengths.
+void set_mode(int which) {
+  SendMessageW(g.mode_auto, BM_SETCHECK, which == 0 ? BST_CHECKED : BST_UNCHECKED, 0);
+  SendMessageW(g.mode_sep, BM_SETCHECK, which == 1 ? BST_CHECKED : BST_UNCHECKED, 0);
+  SendMessageW(g.mode_len, BM_SETCHECK, which == 2 ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+// Collect lengths from the per-segment boxes (工单 05: one box per segment).
+std::vector<std::size_t> parse_lengths() {
   std::vector<std::size_t> out;
-  std::string s = wide_to_utf8(text);
+  for (HWND h : g.length_boxes) {
+    std::string t = trim(wide_to_utf8(get_edit_text(h)));
+    if (t.empty()) continue;
+    std::size_t v = static_cast<std::size_t>(std::atoll(t.c_str()));
+    if (v > 0) out.push_back(v);
+  }
+  return out;
+}
+
+// Separators are comma-separated, e.g. "@" or "@,|".
+std::vector<std::string> parse_separators() {
+  std::vector<std::string> out;
+  std::string s = wide_to_utf8(get_edit_text(g.sep_edit));
   std::size_t pos = 0;
   while (pos <= s.size()) {
     std::size_t comma = s.find(',', pos);
     std::string part = trim(s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos));
-    if (!part.empty()) {
-      std::size_t v = static_cast<std::size_t>(std::atoll(part.c_str()));
-      if (v > 0) out.push_back(v);
-    }
+    if (!part.empty()) out.push_back(part);
     if (comma == std::string::npos) break;
     pos = comma + 1;
   }
   return out;
+}
+
+// Rebuild the per-segment length boxes to match the chosen segment count,
+// preserving the values already typed.
+void rebuild_length_boxes(HWND hwnd) {
+  std::vector<std::string> old;
+  for (HWND h : g.length_boxes) old.push_back(wide_to_utf8(get_edit_text(h)));
+  for (HWND h : g.length_boxes) DestroyWindow(h);
+  g.length_boxes.clear();
+  int cur = static_cast<int>(SendMessageW(g.seg_count_combo, CB_GETCURSEL, 0, 0));
+  if (cur < 0) cur = 0;
+  for (int i = 0; i <= cur; ++i) {
+    HWND h = make_edit(hwnd, IDC_LEN_BASE + i, LEFT, 0, 56, CTRL_H, 0);
+    if (i < static_cast<int>(old.size())) SetWindowTextW(h, utf8_to_wide(old[i]).c_str());
+    g.length_boxes.push_back(h);
+  }
+  layout(hwnd);
 }
 
 // ---- engine interaction ----
@@ -471,7 +542,9 @@ void run_generate(HWND hwnd) {
   p.negatives = collect_edits(g.neg_edits);
   auto& cfg = p.segment_config;
   cfg.use_lengths = is_mode_lengths();
-  cfg.lengths = parse_lengths(get_edit_text(g.lengths_edit));
+  cfg.use_separators = is_mode_separators();
+  cfg.lengths = parse_lengths();
+  cfg.separators = parse_separators();
   cfg.promote_tags = g.promote_tags;
   cfg.field_overrides = g.field_overrides;
 
@@ -534,16 +607,42 @@ std::wstring exe_dir() {
 }
 
 std::wstring project_name() {
-  std::wstring n = get_edit_text(g.project_edit);
+  std::wstring n = get_edit_text(g.project_combo);
   if (n.empty()) n = L"project-1";
   return n;
+}
+
+// List saved projects (exe-adjacent *.rgx files) into the combo box.
+void populate_projects() {
+  if (!g.project_combo) return;
+  SendMessageW(g.project_combo, CB_RESETCONTENT, 0, 0);
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW((exe_dir() + L"\\*.rgx").c_str(), &fd);
+  if (h == INVALID_HANDLE_VALUE) return;
+  do {
+    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+      std::wstring name = fd.cFileName;
+      std::size_t dot = name.find_last_of(L'.');
+      if (dot != std::wstring::npos) name = name.substr(0, dot);
+      SendMessageW(g.project_combo, CB_ADDSTRING, 0,
+                   reinterpret_cast<LPARAM>(name.c_str()));
+    }
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
 }
 
 std::string serialize_project() {
   std::string out;
   out += "name=" + wide_to_utf8(project_name()) + "\n";
-  out += std::string("mode=") + (is_mode_lengths() ? "lengths" : "auto") + "\n";
-  out += "lengths=" + wide_to_utf8(get_edit_text(g.lengths_edit)) + "\n";
+  out += std::string("mode=") + (is_mode_separators() ? "separators"
+                                : is_mode_lengths() ? "lengths" : "auto") + "\n";
+  std::string lengths_text;
+  for (size_t i = 0; i < g.length_boxes.size(); ++i) {
+    if (i) lengths_text += ",";
+    lengths_text += wide_to_utf8(get_edit_text(g.length_boxes[i]));
+  }
+  out += "lengths=" + lengths_text + "\n";
+  out += "separators=" + wide_to_utf8(get_edit_text(g.sep_edit)) + "\n";
   if (!g.promote_tags.empty()) {
     out += "promote=";
     for (size_t i = 0; i < g.promote_tags.size(); ++i) {
@@ -582,8 +681,8 @@ bool load_project(const std::wstring& name, std::wstring& error) {
   std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 
   std::vector<std::string> positives, negatives;
-  bool use_lengths = false;
-  std::wstring lengths_text;
+  bool use_lengths = false, use_separators = false;
+  std::wstring lengths_text, separators_text;
   std::vector<std::string> promote;
   std::vector<regex_tool::FieldRule> overrides;
   std::string selected;
@@ -604,8 +703,9 @@ bool load_project(const std::wstring& name, std::wstring& error) {
     std::string value = line.substr(eq + 1);
     if (key == "positive") positives.push_back(value);
     else if (key == "negative") negatives.push_back(value);
-    else if (key == "mode") use_lengths = (value == "lengths");
+    else if (key == "mode") { use_separators = (value == "separators"); use_lengths = (value == "lengths"); }
     else if (key == "lengths") lengths_text = utf8_to_wide(value);
+    else if (key == "separators") separators_text = utf8_to_wide(value);
     else if (key == "name") saw_name = true;
     else if (key == "promote") {
       std::size_t b = 0;
@@ -648,10 +748,26 @@ bool load_project(const std::wstring& name, std::wstring& error) {
   }
 
   // Apply to the UI.
-  SetWindowTextW(g.project_edit, name.c_str());
-  SendMessageW(g.mode_auto, BM_SETCHECK, use_lengths ? BST_UNCHECKED : BST_CHECKED, 0);
-  SendMessageW(g.mode_len, BM_SETCHECK, use_lengths ? BST_CHECKED : BST_UNCHECKED, 0);
-  SetWindowTextW(g.lengths_edit, lengths_text.c_str());
+  SetWindowTextW(g.project_combo, name.c_str());
+  set_mode(use_separators ? 1 : use_lengths ? 2 : 0);
+  SetWindowTextW(g.sep_edit, separators_text.c_str());
+  {
+    std::vector<std::string> parts;
+    std::wstring cur;
+    for (wchar_t c : lengths_text) {
+      if (c == L',') { if (!cur.empty()) { parts.push_back(wide_to_utf8(cur)); cur.clear(); } }
+      else cur += c;
+    }
+    if (!cur.empty()) parts.push_back(wide_to_utf8(cur));
+    int count = static_cast<int>(parts.size());
+    if (count > 10) count = 10;
+    if (count < 1) count = 1;
+    SendMessageW(g.seg_count_combo, CB_SETCURSEL, count - 1, 0);
+    rebuild_length_boxes(g_main_hwnd);
+    for (int i = 0; i < count && i < static_cast<int>(g.length_boxes.size()); ++i) {
+      SetWindowTextW(g.length_boxes[i], utf8_to_wide(parts[i]).c_str());
+    }
+  }
   g.promote_tags = promote;
   g.field_overrides = overrides;
   g.has_selftest_candidate = !selected.empty();
@@ -680,20 +796,46 @@ bool load_project(const std::wstring& name, std::wstring& error) {
 
 // ---- layout ----
 
+// Total height of the scrollable left column, in client pixels.
+int content_height() {
+  int y = 8;
+  y += ROW_H + 4;                                            // project row
+  y += 20;                                                    // positives label
+  y += static_cast<int>(g.pos_edits.size()) * ROW_H;
+  y += ROW_H + 6;                                             // +正例 / 批量粘贴
+  y += 20;                                                    // negatives label
+  y += static_cast<int>(g.neg_edits.size()) * ROW_H;
+  y += ROW_H + 6;                                             // +反例 / 批量粘贴
+  y += 20;                                                    // 分段配置 label
+  y += ROW_H;                                                 // mode radios
+  y += ROW_H;                                                 // separators + segment count
+  y += static_cast<int>((g.length_boxes.size() + LEN_PER_LINE - 1) / LEN_PER_LINE) * ROW_H;
+  y += static_cast<int>(g.seg_edits.size()) * ROW_H;          // segment rule table
+  y += ROW_H;                                                 // generate button
+  return y + 30;
+}
+
 void layout(HWND hwnd) {
   RECT rc;
   GetClientRect(hwnd, &rc);
   int view = std::max(static_cast<int>(rc.bottom), 1);
 
+  // Clamp the scroll position to what the scrollbar can actually show, so a
+  // shrinking content (rows deleted, window enlarged) cannot leave the layout
+  // positioned far off-screen (the "elements clumped together" symptom).
+  int content = std::max(content_height(), view);
+  int max_pos = std::max(content - view, 0);
+  if (g.scroll_pos > max_pos) g.scroll_pos = max_pos;
+
   int y = 8 - g.scroll_pos;
 
-  MoveWindow(g.project_edit, LEFT, y, 150, CTRL_H, TRUE);
+  MoveWindow(g.project_combo, LEFT, y, 150, CTRL_H, TRUE);
   MoveWindow(g.new_btn, LEFT + 156, y, 56, CTRL_H, TRUE);
   MoveWindow(g.save_btn, LEFT + 218, y, 56, CTRL_H, TRUE);
   MoveWindow(g.load_btn, LEFT + 280, y, 56, CTRL_H, TRUE);
   y += ROW_H + 4;
 
-  MoveWindow(g.pos_label, LEFT, y, 80, 18, TRUE);
+  MoveWindow(g.pos_label, LEFT, y, 160, 18, TRUE);
   y += 20;
   for (size_t i = 0; i < g.pos_edits.size(); ++i) {
     MoveWindow(g.pos_edits[i], LEFT, y, EDIT_W, CTRL_H, TRUE);
@@ -704,7 +846,7 @@ void layout(HWND hwnd) {
   MoveWindow(g.batch_pos, LEFT + 88, y, 88, CTRL_H, TRUE);
   y += ROW_H + 6;
 
-  MoveWindow(g.neg_label, LEFT, y, 80, 18, TRUE);
+  MoveWindow(g.neg_label, LEFT, y, 160, 18, TRUE);
   y += 20;
   for (size_t i = 0; i < g.neg_edits.size(); ++i) {
     MoveWindow(g.neg_edits[i], LEFT, y, EDIT_W, CTRL_H, TRUE);
@@ -718,10 +860,22 @@ void layout(HWND hwnd) {
   MoveWindow(g.cfg_label, LEFT, y, 120, 18, TRUE);
   y += 20;
   MoveWindow(g.mode_auto, LEFT, y, 76, CTRL_H, TRUE);
-  MoveWindow(g.mode_len, LEFT + 82, y, 76, CTRL_H, TRUE);
-  MoveWindow(g.len_label, LEFT + 164, y, 60, CTRL_H, TRUE);
-  MoveWindow(g.lengths_edit, LEFT + 224, y, 120, CTRL_H, TRUE);
+  MoveWindow(g.mode_sep, LEFT + 82, y, 88, CTRL_H, TRUE);
+  MoveWindow(g.mode_len, LEFT + 176, y, 76, CTRL_H, TRUE);
   y += ROW_H;
+
+  MoveWindow(g.sep_label, LEFT, y, 62, CTRL_H, TRUE);
+  MoveWindow(g.sep_edit, LEFT + 66, y, 92, CTRL_H, TRUE);
+  MoveWindow(g.count_label, LEFT + 168, y, 46, CTRL_H, TRUE);
+  MoveWindow(g.seg_count_combo, LEFT + 218, y, 60, CTRL_H, TRUE);
+  y += ROW_H;
+
+  for (size_t i = 0; i < g.length_boxes.size(); ++i) {
+    MoveWindow(g.length_boxes[i],
+               LEFT + static_cast<int>(i % LEN_PER_LINE) * 62,
+               y + static_cast<int>(i / LEN_PER_LINE) * ROW_H, 56, CTRL_H, TRUE);
+  }
+  y += static_cast<int>((g.length_boxes.size() + LEN_PER_LINE - 1) / LEN_PER_LINE) * ROW_H;
 
   for (size_t i = 0; i < g.seg_edits.size(); ++i) {
     MoveWindow(g.seg_edits[i], LEFT, y, EDIT_W, CTRL_H, TRUE);
@@ -732,7 +886,6 @@ void layout(HWND hwnd) {
   }
   MoveWindow(g.generate_btn, LEFT, y, 88, CTRL_H, TRUE);
 
-  int content = std::max(y + 30, view);
   SCROLLINFO si{};
   si.cbSize = sizeof(si);
   si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
@@ -756,7 +909,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CREATE: {
       g.font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
-      g.project_edit = make_edit(hwnd, IDC_PROJECT_EDIT, LEFT, 0, 150, CTRL_H, 0);
+      g.project_combo = make_combo(hwnd, IDC_PROJECT_EDIT, LEFT, 0, 150, 200, true);
       g.new_btn = make_button(hwnd, L"新建", IDC_NEW, 0, 0, 0, 0);
       g.save_btn = make_button(hwnd, L"保存", IDC_SAVE, 0, 0, 0, 0);
       g.load_btn = make_button(hwnd, L"加载", IDC_LOAD, 0, 0, 0, 0);
@@ -771,10 +924,18 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
       g.cfg_label = make_static(hwnd, L"分段配置", LEFT, 0, 120, 18);
       g.mode_auto = make_radio(hwnd, L"自动分段", IDC_MODE_AUTO, 0, 0, 0, 0, true);
+      g.mode_sep = make_radio(hwnd, L"按分隔符", IDC_MODE_SEP, 0, 0, 0, 0, false);
       g.mode_len = make_radio(hwnd, L"按长度", IDC_MODE_LEN, 0, 0, 0, 0, false);
-      SendMessageW(g.mode_auto, BM_SETCHECK, BST_CHECKED, 0);
-      g.len_label = make_static(hwnd, L"长度:", LEFT + 164, 0, 60, CTRL_H);
-      g.lengths_edit = make_edit(hwnd, IDC_LENGTHS_EDIT, 0, 0, 120, CTRL_H, 0);
+      set_mode(0);
+      g.sep_label = make_static(hwnd, L"分隔符:", LEFT, 0, 62, CTRL_H);
+      g.sep_edit = make_edit(hwnd, IDC_SEP_EDIT, LEFT + 66, 0, 92, CTRL_H, 0);
+      g.count_label = make_static(hwnd, L"段数:", LEFT + 168, 0, 46, CTRL_H);
+      g.seg_count_combo = make_combo(hwnd, IDC_SEG_COUNT_COMBO, LEFT + 218, 0, 60, 200, false);
+      for (int i = 1; i <= 10; ++i) {
+        std::wstring t = std::to_wstring(i);
+        SendMessageW(g.seg_count_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(t.c_str()));
+      }
+      SendMessageW(g.seg_count_combo, CB_SETCURSEL, 1, 0);  // 2 segments by default
 
       g.generate_btn = make_button(hwnd, L"生成", IDC_GENERATE, 0, 0, 0, 0);
 
@@ -784,6 +945,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       g.selftest_edit = make_edit(hwnd, IDC_SELFTEST_EDIT, 0, 0, 0, 0, 0);
       g.selftest_btn = make_button(hwnd, L"判定", IDC_SELFTEST_BTN, 0, 0, 0, 0);
 
+      populate_projects();
+      rebuild_length_boxes(hwnd);
       add_example_row(hwnd, false);  // start with one empty positive row
       return 0;
     }
@@ -791,6 +954,15 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_SIZE:
       layout(hwnd);
       return 0;
+
+    case WM_GETMINMAXINFO: {
+      // The right pane (results + self-test) is laid out against the window
+      // height; forbid a window too small for it to fit without overlapping.
+      auto mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+      mmi->ptMinTrackSize.x = 620;
+      mmi->ptMinTrackSize.y = 420;
+      return 0;
+    }
 
     case WM_VSCROLL: {
       SCROLLINFO si{};
@@ -833,17 +1005,32 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         run_selftest();
         return 0;
       }
+      // Picking a saved project from the combo loads it (工单 08).
+      if (id == IDC_PROJECT_EDIT && code == CBN_SELCHANGE) {
+        std::wstring sel = get_edit_text(g.project_combo);
+        if (!sel.empty()) {
+          std::wstring err;
+          if (!load_project(sel, err)) MessageBoxW(hwnd, err.c_str(), L"加载项目", MB_ICONERROR);
+        }
+        return 0;
+      }
+      // Choosing the segment count rebuilds the per-segment length boxes.
+      if (id == IDC_SEG_COUNT_COMBO && code == CBN_SELCHANGE) {
+        rebuild_length_boxes(hwnd);
+        return 0;
+      }
       if (code != BN_CLICKED) return 0;
       if (id == IDC_NEW) {
         g.promote_tags.clear();
         g.field_overrides.clear();
         g.has_selftest_candidate = false;
-        SetWindowTextW(g.project_edit, L"");
-        SetWindowTextW(g.lengths_edit, L"");
+        SetWindowTextW(g.project_combo, L"");
+        SetWindowTextW(g.sep_edit, L"");
         SetWindowTextW(g.result_edit, L"");
         SetWindowTextW(g.selftest_label, L"自测:");
-        SendMessageW(g.mode_auto, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g.mode_len, BM_SETCHECK, BST_UNCHECKED, 0);
+        set_mode(0);
+        SendMessageW(g.seg_count_combo, CB_SETCURSEL, 1, 0);
+        rebuild_length_boxes(hwnd);
         clear_example_rows(false);
         clear_example_rows(true);
         destroy_segment_table();
@@ -870,16 +1057,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (id == IDC_ADD_NEG) { add_example_row(hwnd, true); return 0; }
       if (id == IDC_BATCH_POS) { run_batch_dialog(hwnd, false); return 0; }
       if (id == IDC_BATCH_NEG) { run_batch_dialog(hwnd, true); return 0; }
-      if (id == IDC_MODE_AUTO) {
-        SendMessageW(g.mode_auto, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g.mode_len, BM_SETCHECK, BST_UNCHECKED, 0);
-        return 0;
-      }
-      if (id == IDC_MODE_LEN) {
-        SendMessageW(g.mode_auto, BM_SETCHECK, BST_UNCHECKED, 0);
-        SendMessageW(g.mode_len, BM_SETCHECK, BST_CHECKED, 0);
-        return 0;
-      }
+      if (id == IDC_MODE_AUTO) { set_mode(0); return 0; }
+      if (id == IDC_MODE_SEP) { set_mode(1); return 0; }
+      if (id == IDC_MODE_LEN) { set_mode(2); return 0; }
       if (id == IDC_GENERATE) { run_generate(hwnd); return 0; }
       if (id == IDC_SELFTEST_BTN) { run_selftest(); return 0; }
       if (id >= IDC_POS_DEL_BASE && id < IDC_POS_DEL_BASE + 10000) {

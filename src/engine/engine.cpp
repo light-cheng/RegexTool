@@ -212,6 +212,72 @@ std::vector<SegmentRule> segment_by_lengths(const std::vector<std::string>& posi
   return segments;
 }
 
+// Split all positives at the same separator positions (single or multiple
+// separators). The split points come from the first positive; every other
+// positive must have the same separator at the same position, otherwise we fall
+// back to positional segmentation with a warning. Returns empty when no
+// separator is found or the positions disagree (caller falls back).
+std::vector<SegmentRule> segment_by_separators(const std::vector<std::string>& positives,
+                                               const std::vector<std::string>& separators,
+                                               std::vector<std::string>& warnings) {
+  struct Hit {
+    std::size_t pos;
+    std::string sep;
+  };
+  std::vector<Hit> hits;
+  const std::string& first = positives[0];
+  std::size_t i = 0;
+  while (i < first.size()) {
+    bool matched = false;
+    for (const auto& sep : separators) {
+      if (sep.empty()) continue;
+      if (first.compare(i, sep.size(), sep) == 0) {
+        hits.push_back({i, sep});
+        i += sep.size();
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) ++i;
+  }
+  if (hits.empty()) return {};  // no separator present; fall back silently
+
+  for (const auto& s : positives) {
+    for (const auto& h : hits) {
+      if (s.size() < h.pos + h.sep.size() || s.compare(h.pos, h.sep.size(), h.sep) != 0) {
+        warnings.push_back("各正例的分隔符位置不一致，已改用自动分段");
+        return {};  // signals fallback
+      }
+    }
+  }
+
+  // Chunk every positive at the hit positions; chunks[c] holds the c-th chunk
+  // of every positive, so each chunk is inferred independently.
+  std::size_t nchunks = hits.size() + 1;
+  std::vector<std::vector<std::string>> chunks(nchunks);
+  for (const auto& s : positives) {
+    std::size_t start = 0;
+    for (std::size_t c = 0; c < nchunks; ++c) {
+      std::size_t end = (c < hits.size()) ? hits[c].pos : s.size();
+      chunks[c].push_back(s.substr(start, end > start ? end - start : 0));
+      if (c < hits.size()) start = hits[c].pos + hits[c].sep.size();
+    }
+  }
+
+  std::vector<SegmentRule> segments;
+  for (std::size_t c = 0; c < nchunks; ++c) {
+    auto sub = segment_positives(chunks[c]);
+    for (auto& seg : sub) segments.push_back(std::move(seg));
+    if (c < hits.size()) {
+      SegmentRule lit;
+      lit.is_literal = true;
+      lit.literal = hits[c].sep;
+      segments.push_back(std::move(lit));
+    }
+  }
+  return segments;
+}
+
 // Merge adjacent literal segments and adjacent fields with identical charset +
 // name (e.g. promoted "SQ\d{3}" next to an existing "SQ\d{1}" -> "SQ\d{4}").
 std::vector<SegmentRule> normalize_segments(std::vector<SegmentRule> segments) {
@@ -464,7 +530,10 @@ GenerationResult generate(const Project& project) {
 
   std::vector<SegmentRule> segments;
   const auto& cfg = project.segment_config;
-  if (cfg.use_lengths && !cfg.lengths.empty()) {
+  if (cfg.use_separators && !cfg.separators.empty()) {
+    segments = segment_by_separators(cleaned, cfg.separators, result.warnings);
+    if (segments.empty()) segments = segment_positives(cleaned);  // fallback
+  } else if (cfg.use_lengths && !cfg.lengths.empty()) {
     segments = segment_by_lengths(cleaned, cfg.lengths, result.warnings);
     name_fields_from_preceding_literals(segments);
   } else {

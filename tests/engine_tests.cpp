@@ -493,6 +493,54 @@ void test_candidates_filtered_when_negative_leaks_under_relaxation() {
 
 // ---- 工单 09: fallback when nothing passes ----
 
+// ---- 显式分隔符分段（单/多） ----
+
+void test_explicit_separator_matches_automatic() {
+  // Explicit "@" segmentation reproduces the automatic result on the real data.
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  p.segment_config.use_separators = true;
+  p.segment_config.separators = {"@"};
+  auto result = regex_tool::generate(p);
+  CHECK_EQ(first_regex(result), std::string(kExpectedRegex));
+  CHECK(result.candidates.front().passes_all);
+  CHECK(result.warnings.empty());
+}
+
+void test_multiple_separators() {
+  regex_tool::Project p;
+  p.positives = {"AB12|CD34@EF56", "AB78|CD90@EF12"};
+  p.segment_config.use_separators = true;
+  p.segment_config.separators = {"|", "@"};
+  auto result = regex_tool::generate(p);
+  CHECK_EQ(first_regex(result), std::string("^AB\\d{2}\\|CD\\d{2}@EF\\d{2}$"));
+  CHECK(result.candidates.front().passes_all);
+}
+
+void test_separator_position_mismatch_falls_back_with_warning() {
+  regex_tool::Project p;
+  p.positives = {"AB12|CD34", "AB|CD34@EF"};  // "|" at different positions
+  p.segment_config.use_separators = true;
+  p.segment_config.separators = {"|"};
+  auto result = regex_tool::generate(p);
+  CHECK(!result.warnings.empty());
+  // Falls back to positional segmentation: the result still validates.
+  CHECK(result.candidates.front().passes_all);
+}
+
+void test_separator_mode_with_promote_sq() {
+  // The SQ000 payoff works in explicit-separator mode too.
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  p.segment_config.use_separators = true;
+  p.segment_config.separators = {"@"};
+  p.segment_config.promote_tags = {"SQ"};
+  auto result = regex_tool::generate(p);
+  CHECK_EQ(first_regex(result),
+           std::string("^PN\\d{4}@BN\\d{4}@DT2026@LT\\d{4}@SQ\\d{4}@WK\\d{2}$"));
+  CHECK(result.candidates.front().passes_all);
+}
+
 void test_none_pass_fallback_keeps_closest() {
   regex_tool::Project p;
   p.positives = {"AB1", "AB2"};
@@ -554,6 +602,10 @@ int main() {
   test_multiple_candidates_generated_and_ranked();
   test_variant_regex_texts();
   test_candidates_filtered_when_negative_leaks_under_relaxation();
+  test_explicit_separator_matches_automatic();
+  test_multiple_separators();
+  test_separator_position_mismatch_falls_back_with_warning();
+  test_separator_mode_with_promote_sq();
   test_none_pass_fallback_keeps_closest();
 
   if (g_failures == 0) {
