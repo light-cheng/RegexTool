@@ -1,0 +1,267 @@
+#include "engine/engine.h"
+
+#include <algorithm>
+#include <cctype>
+#include <regex>
+#include <set>
+
+namespace regex_tool {
+
+namespace {
+
+std::string trim_whitespace(const std::string& s) {
+  auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+  std::size_t b = 0;
+  std::size_t e = s.size();
+  while (b < e && is_space(s[b])) ++b;
+  while (e > b && is_space(s[e - 1])) --e;
+  return s.substr(b, e - b);
+}
+
+std::string escape_literal(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    switch (c) {
+      case '\\': case '.': case '^': case '$': case '[': case ']':
+      case '(': case ')': case '{': case '}': case '*': case '+':
+      case '?': case '|': case '-':
+        out += '\\';
+        out += c;
+        break;
+      default:
+        out += c;
+    }
+  }
+  return out;
+}
+
+// Classify the distinct characters observed in a field into a regex charset.
+std::string charset_for(const std::set<char>& chars) {
+  if (chars.empty()) return "\\d";
+  bool has_digit = false, has_upper = false, has_lower = false, has_other = false;
+  for (char c : chars) {
+    unsigned char u = static_cast<unsigned char>(c);
+    if (std::isdigit(u)) has_digit = true;
+    else if (std::isupper(u)) has_upper = true;
+    else if (std::islower(u)) has_lower = true;
+    else has_other = true;
+  }
+  if (!has_other) {
+    if (has_digit && !has_upper && !has_lower) return "\\d";
+    if (has_upper && !has_digit && !has_lower) return "[A-Z]";
+    if (has_lower && !has_digit && !has_upper) return "[a-z]";
+    if (has_upper && has_lower && !has_digit) return "[A-Za-z]";
+    if (has_digit && !has_lower) return "[A-Z0-9]";
+    if (has_digit && !has_upper) return "[a-z0-9]";
+    if (has_digit) return "[A-Za-z0-9]";
+  }
+  // Punctuation, spaces or non-ASCII bytes: emit an explicit class.
+  std::string cls = "[";
+  for (char c : chars) {
+    switch (c) {
+      case '\\': case ']': case '^': case '-':
+        cls += '\\';
+        cls += c;
+        break;
+      default:
+        cls += c;
+    }
+  }
+  cls += "]";
+  return cls;
+}
+
+bool charset_matches(const std::string& frag, char c) {
+  unsigned char u = static_cast<unsigned char>(c);
+  if (frag == "\\d") return std::isdigit(u) != 0;
+  if (frag == "[A-Z]") return std::isupper(u) != 0;
+  if (frag == "[a-z]") return std::islower(u) != 0;
+  if (frag == "[A-Za-z]") return std::isalpha(u) != 0;
+  if (frag == "[A-Z0-9]") return std::isupper(u) != 0 || std::isdigit(u) != 0;
+  if (frag == "[a-z0-9]") return std::islower(u) != 0 || std::isdigit(u) != 0;
+  if (frag == "[A-Za-z0-9]") return std::isalnum(u) != 0;
+  if (frag.size() >= 2 && frag.front() == '[' && frag.back() == ']') {
+    for (std::size_t i = 1; i + 1 < frag.size(); ++i) {
+      char cc = frag[i];
+      if (cc == '\\' && i + 2 < frag.size()) { cc = frag[++i]; }
+      if (cc == c) return true;
+    }
+  }
+  return false;
+}
+
+// Field name = the trailing run of letters of the literal that precedes it,
+// tolerating trailing digits (e.g. "@BN" -> "BN", "@DT2026@LT" -> "LT",
+// "@SQ000" -> "SQ"); empty when there is no tag.
+std::string tag_from_literal(const std::string& literal) {
+  std::size_t end = literal.size();
+  while (end > 0 && std::isdigit(static_cast<unsigned char>(literal[end - 1]))) --end;
+  std::size_t begin = end;
+  while (begin > 0 && std::isalpha(static_cast<unsigned char>(literal[begin - 1]))) --begin;
+  return literal.substr(begin, end - begin);
+}
+
+// Split the aligned positives into alternating literal/field segments.
+// Constancy is judged only within the shared prefix (min_len); everything past
+// it is variable, and variable stretches extend to the longest example.
+std::vector<SegmentRule> segment_positives(const std::vector<std::string>& positives) {
+  std::size_t min_len = SIZE_MAX, max_len = 0;
+  for (const auto& s : positives) {
+    min_len = std::min(min_len, s.size());
+    max_len = std::max(max_len, s.size());
+  }
+  if (min_len == SIZE_MAX) min_len = 0;
+
+  std::vector<bool> is_const(max_len);
+  for (std::size_t p = 0; p < max_len; ++p) {
+    bool same = p < min_len;
+    if (same) {
+      char c = positives[0][p];
+      for (const auto& s : positives) {
+        if (s[p] != c) { same = false; break; }
+      }
+    }
+    is_const[p] = same;
+  }
+
+  struct Stretch {
+    bool constant;
+    std::size_t begin;
+    std::size_t len;
+  };
+  std::vector<Stretch> stretches;
+
+  auto push = [&](bool constant, std::size_t begin, std::size_t len) {
+    if (len == 0) return;
+    if (!stretches.empty() && stretches.back().constant == constant) {
+      stretches.back().len += len;
+    } else {
+      stretches.push_back({constant, begin, len});
+    }
+  };
+
+  std::size_t p = 0;
+  while (p < max_len) {
+    bool constant = is_const[p];
+    std::size_t q = p;
+    while (q < max_len && is_const[q] == constant) ++q;
+    push(constant, p, q - p);
+    p = q;
+  }
+
+  std::vector<SegmentRule> segments;
+  int field_no = 0;
+  for (std::size_t i = 0; i < stretches.size(); ++i) {
+    const Stretch& st = stretches[i];
+    if (st.constant) {
+      SegmentRule seg;
+      seg.is_literal = true;
+      // The stretch text is identical across all positives; take it from the first.
+      seg.literal = positives[0].substr(st.begin, st.len);
+      segments.push_back(std::move(seg));
+      continue;
+    }
+    std::set<char> chars;
+    std::size_t min_f = SIZE_MAX, max_f = 0;
+    for (const auto& s : positives) {
+      std::size_t b = std::min(st.begin, s.size());
+      std::size_t e = std::min(st.begin + st.len, s.size());
+      for (std::size_t k = b; k < e; ++k) chars.insert(s[k]);
+      std::size_t n = (e > b) ? e - b : 0;
+      min_f = std::min(min_f, n);
+      max_f = std::max(max_f, n);
+    }
+    SegmentRule seg;
+    seg.is_literal = false;
+    seg.field.name = (i > 0) ? tag_from_literal(segments.back().literal) : "";
+    if (seg.field.name.empty()) seg.field.name = "Field" + std::to_string(++field_no);
+    seg.field.charset = charset_for(chars);
+    seg.field.min_len = min_f;
+    seg.field.max_len = max_f;
+    segments.push_back(std::move(seg));
+  }
+  return segments;
+}
+
+std::string compose_regex(const std::vector<SegmentRule>& segments) {
+  std::string out = "^";
+  for (const auto& seg : segments) {
+    if (seg.is_literal) {
+      out += escape_literal(seg.literal);
+    } else {
+      out += seg.field.charset;
+      if (seg.field.min_len == 1 && seg.field.max_len == 1) {
+        // bare class, e.g. \d — {1} would be noise
+      } else if (seg.field.min_len == seg.field.max_len) {
+        out += "{" + std::to_string(seg.field.min_len) + "}";
+      } else {
+        out += "{" + std::to_string(seg.field.min_len) + "," + std::to_string(seg.field.max_len) + "}";
+      }
+    }
+  }
+  out += "$";
+  return out;
+}
+
+ExampleVerdict verify(const Candidate& candidate, const std::string& example) {
+  ExampleVerdict verdict;
+  verdict.example = example;
+
+  // Authoritative check: anchored full match with the same engine style we emit.
+  std::regex re(candidate.regex);
+  verdict.passed = std::regex_match(example, re);
+
+  // Diagnostic + captures: greedy walk over the segment model.
+  std::size_t pos = 0;
+  std::size_t first_fail = SIZE_MAX;
+  for (std::size_t i = 0; i < candidate.segments.size(); ++i) {
+    const auto& seg = candidate.segments[i];
+    if (seg.is_literal) {
+      if (example.compare(pos, seg.literal.size(), seg.literal) != 0) {
+        first_fail = i;
+        break;
+      }
+      pos += seg.literal.size();
+    } else {
+      std::size_t run = 0;
+      while (run < seg.field.max_len && pos + run < example.size() &&
+             charset_matches(seg.field.charset, example[pos + run])) {
+        ++run;
+      }
+      if (run < seg.field.min_len) {
+        first_fail = i;
+        break;
+      }
+      if (verdict.passed) {
+        verdict.field_captures.emplace_back(seg.field.name, example.substr(pos, run));
+      }
+      pos += run;
+    }
+  }
+  if (pos != example.size() && first_fail == SIZE_MAX) first_fail = SIZE_MAX;  // tail mismatch; keep SIZE_MAX
+  verdict.failing_segment = verdict.passed ? SIZE_MAX : first_fail;
+  return verdict;
+}
+
+}  // namespace
+
+GenerationResult generate(const std::vector<std::string>& positives) {
+  GenerationResult result;
+  if (positives.empty()) {
+    result.candidate.regex = "^$";
+    return result;
+  }
+
+  std::vector<std::string> cleaned;
+  cleaned.reserve(positives.size());
+  for (const auto& s : positives) cleaned.push_back(trim_whitespace(s));
+
+  result.candidate.segments = segment_positives(cleaned);
+  result.candidate.regex = compose_regex(result.candidate.segments);
+
+  result.positive_verdicts.reserve(cleaned.size());
+  for (const auto& s : cleaned) result.positive_verdicts.push_back(verify(result.candidate, s));
+  return result;
+}
+
+}  // namespace regex_tool
