@@ -1,6 +1,6 @@
 # 条码正则生成器（Regex Builder）
 
-Status: ready-for-agent
+Status: implemented（2026-08-17 工单 01–09 全部完成并提交；UI 待用户双击运行确认）
 
 ## Problem Statement
 
