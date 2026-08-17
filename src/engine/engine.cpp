@@ -236,6 +236,28 @@ std::vector<SegmentRule> normalize_segments(std::vector<SegmentRule> segments) {
   return out;
 }
 
+// Letter-run + digit-run units inside a string (the promotable shapes of 工单 05).
+struct TagUnit {
+  std::size_t letter_begin;
+  std::size_t letter_end;
+  std::size_t digit_end;
+};
+
+std::vector<TagUnit> scan_tag_units(const std::string& s) {
+  std::vector<TagUnit> units;
+  std::size_t i = 0;
+  while (i < s.size()) {
+    std::size_t l = i;
+    while (l < s.size() && std::isalpha(static_cast<unsigned char>(s[l]))) ++l;
+    if (l == i) { ++i; continue; }  // not a letter run
+    std::size_t d = l;
+    while (d < s.size() && std::isdigit(static_cast<unsigned char>(s[d]))) ++d;
+    if (d > l) units.push_back({i, l, d});
+    i = (d > l) ? d : l;
+  }
+  return units;
+}
+
 // Promote literal segments that contain a listed tag followed by digits (e.g.
 // "@DT2026@LT" with tag "DT"): the tag stays as fixed text, the trailing digits
 // become a field, and the rest of the literal stays fixed. Constant stretches of
@@ -252,43 +274,40 @@ void apply_promotes(std::vector<SegmentRule>& segments, const std::vector<std::s
     std::string rest = seg.literal;
     std::vector<SegmentRule> pieces;
     bool promoted_any = false;
-    std::size_t cur = 0;
-    while (cur < rest.size()) {
-      std::size_t l = cur;
-      while (l < rest.size() && std::isalpha(static_cast<unsigned char>(rest[l]))) ++l;
-      if (l == cur) { ++cur; continue; }  // not a letter run
-      std::size_t d = l;
-      while (d < rest.size() && std::isdigit(static_cast<unsigned char>(rest[d]))) ++d;
-      std::string tag = rest.substr(cur, l - cur);
-      bool want = std::find(tags.begin(), tags.end(), tag) != tags.end();
-      if (want && d > l) {
-        if (cur > 0) {  // fixed text before the tag
-          SegmentRule f;
-          f.is_literal = true;
-          f.literal = rest.substr(0, cur);
-          pieces.push_back(std::move(f));
-        }
-        SegmentRule tag_seg;  // the tag itself stays fixed
-        tag_seg.is_literal = true;
-        tag_seg.literal = tag;
-        pieces.push_back(std::move(tag_seg));
-
-        SegmentRule field_seg;  // the value becomes a field
-        field_seg.is_literal = false;
-        field_seg.field.name = tag;
-        std::set<char> value_chars;
-        for (std::size_t k = l; k < d; ++k) value_chars.insert(rest[k]);
-        field_seg.field.charset = charset_for(value_chars);
-        field_seg.field.min_len = d - l;
-        field_seg.field.max_len = d - l;
-        pieces.push_back(std::move(field_seg));
-
-        rest = rest.substr(d);  // continue scanning the remainder
-        cur = 0;
-        promoted_any = true;
-        continue;
+    while (!rest.empty()) {
+      auto units = scan_tag_units(rest);
+      std::size_t pick = SIZE_MAX;
+      for (std::size_t u = 0; u < units.size(); ++u) {
+        std::string tag = rest.substr(units[u].letter_begin,
+                                      units[u].letter_end - units[u].letter_begin);
+        if (std::find(tags.begin(), tags.end(), tag) != tags.end()) { pick = u; break; }
       }
-      cur = (d > l) ? d : l;  // skip this tag+value unit untouched
+      if (pick == SIZE_MAX) break;
+      const TagUnit& unit = units[pick];
+      std::string tag = rest.substr(unit.letter_begin, unit.letter_end - unit.letter_begin);
+      if (unit.letter_begin > 0) {  // fixed text before the tag
+        SegmentRule f;
+        f.is_literal = true;
+        f.literal = rest.substr(0, unit.letter_begin);
+        pieces.push_back(std::move(f));
+      }
+      SegmentRule tag_seg;  // the tag itself stays fixed
+      tag_seg.is_literal = true;
+      tag_seg.literal = tag;
+      pieces.push_back(std::move(tag_seg));
+
+      SegmentRule field_seg;  // the value becomes a field
+      field_seg.is_literal = false;
+      field_seg.field.name = tag;
+      std::set<char> value_chars;
+      for (std::size_t k = unit.letter_end; k < unit.digit_end; ++k) value_chars.insert(rest[k]);
+      field_seg.field.charset = charset_for(value_chars);
+      field_seg.field.min_len = unit.digit_end - unit.letter_end;
+      field_seg.field.max_len = unit.digit_end - unit.letter_end;
+      pieces.push_back(std::move(field_seg));
+
+      rest = rest.substr(unit.digit_end);  // continue with the remainder
+      promoted_any = true;
     }
     if (!promoted_any) {
       out.push_back(std::move(seg));
@@ -416,6 +435,14 @@ ExampleVerdict walk_verify(const Candidate& candidate, const std::string& exampl
 ExampleVerdict verify_example(const Candidate& candidate, const std::string& example) {
   // Self-test polarity: "does this barcode match?" — passed == matched.
   return walk_verify(candidate, example);
+}
+
+std::vector<std::string> promotable_tags(const std::string& literal) {
+  std::vector<std::string> tags;
+  for (const auto& unit : scan_tag_units(literal)) {
+    tags.push_back(literal.substr(unit.letter_begin, unit.letter_end - unit.letter_begin));
+  }
+  return tags;
 }
 
 GenerationResult generate(const Project& project) {

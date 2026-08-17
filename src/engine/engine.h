@@ -90,4 +90,8 @@ GenerationResult generate(const std::vector<std::string>& positives);
 // same verification logic as the project examples.
 ExampleVerdict verify_example(const Candidate& candidate, const std::string& example);
 
+// Tags inside a literal that can be promoted to fields (工单 05): letter runs
+// immediately followed by digits, e.g. "@DT2026@LT" -> {"DT"}.
+std::vector<std::string> promotable_tags(const std::string& literal);
+
 }  // namespace regex_tool
