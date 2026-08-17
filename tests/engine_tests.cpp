@@ -302,6 +302,49 @@ void test_empty_negatives_ok() {
   CHECK_EQ(vd.negative_verdicts.size(), 0u);
 }
 
+// ---- 工单 03: alphanumeric fixed markers + single-segment format ----
+
+void test_alnum_marker_segmentation() {
+  // European format: 1P / NQ / 3N are alphanumeric fixed markers acting as
+  // separators; they must stay as literals while the variable runs become fields.
+  auto result = regex_tool::generate({
+      "1P123456NQ7890123N3456",
+      "1P654321NQ2109873N7890",
+      "1P111222NQ3334443N5555",
+  });
+  CHECK_EQ(first_regex(result), std::string("^1P\\d{6}NQ\\d{6}3N\\d{4}$"));
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  // Markers appear as literal segments, in order.
+  std::string literals;
+  for (const auto& seg : vd.candidate.segments) {
+    if (seg.is_literal) literals += seg.literal;
+  }
+  CHECK_EQ(literals, std::string("1PNQ3N"));
+}
+
+void test_single_segment_without_separator_or_marker() {
+  // No separators, no markers: the tool must still produce a regex without any
+  // segmentation configuration.
+  auto result = regex_tool::generate({"ABC123", "ABD456"});
+  CHECK_EQ(first_regex(result), std::string("^AB[A-Z0-9]{4}$"));
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+}
+
+void test_marker_segmentation_consistent_across_examples() {
+  // The same marker segmentation must hold for every positive: an example that
+  // does not fit the shared structure is a different format, not a marker break.
+  auto result = regex_tool::generate({
+      "1P123456NQ7890123N3456",
+      "1P654321NQ2109873N7890",
+  });
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  CHECK_EQ(vd.positive_verdicts.size(), 2u);
+  for (const auto& v : vd.positive_verdicts) CHECK(v.passed);
+}
+
 }  // namespace
 
 int main() {
@@ -322,6 +365,9 @@ int main() {
   test_verify_example_pass_and_fail_with_segment();
   test_non_ascii_preserved_in_literal();
   test_empty_negatives_ok();
+  test_alnum_marker_segmentation();
+  test_single_segment_without_separator_or_marker();
+  test_marker_segmentation_consistent_across_examples();
 
   if (g_failures == 0) {
     std::printf("ALL TESTS PASSED\n");
