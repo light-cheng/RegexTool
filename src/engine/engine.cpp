@@ -183,6 +183,158 @@ std::vector<SegmentRule> segment_positives(const std::vector<std::string>& posit
   return segments;
 }
 
+// Length-based segmentation (工单 05): each positive is cut at the given chunk
+// sizes, then each chunk is segmented independently by the same constancy logic.
+std::vector<SegmentRule> segment_by_lengths(const std::vector<std::string>& positives,
+                                            const std::vector<std::size_t>& lengths,
+                                            std::vector<std::string>& warnings) {
+  std::vector<SegmentRule> segments;
+  std::size_t offset = 0;
+  for (std::size_t c = 0; c < lengths.size(); ++c) {
+    std::size_t b = offset;
+    std::size_t e = offset + lengths[c];
+    std::vector<std::string> chunks;
+    bool any_short = false;
+    for (const auto& s : positives) {
+      if (s.size() < e) any_short = true;
+      std::size_t bb = std::min(b, s.size());
+      std::size_t ee = std::min(e, s.size());
+      chunks.push_back(s.substr(bb, ee > bb ? ee - bb : 0));
+    }
+    if (any_short) {
+      warnings.push_back("正例中有条码短于给定长度之和（第 " + std::to_string(c + 1) +
+                         " 段），已按现有长度切分");
+    }
+    auto sub = segment_positives(chunks);
+    for (auto& seg : sub) segments.push_back(std::move(seg));
+    offset = e;
+  }
+  return segments;
+}
+
+// Merge adjacent literal segments and adjacent fields with identical charset +
+// name (e.g. promoted "SQ\d{3}" next to an existing "SQ\d{1}" -> "SQ\d{4}").
+std::vector<SegmentRule> normalize_segments(std::vector<SegmentRule> segments) {
+  std::vector<SegmentRule> out;
+  for (auto& seg : segments) {
+    if (out.empty()) {
+      out.push_back(std::move(seg));
+      continue;
+    }
+    auto& prev = out.back();
+    if (seg.is_literal && prev.is_literal) {
+      prev.literal += seg.literal;
+    } else if (!seg.is_literal && !prev.is_literal &&
+               prev.field.charset == seg.field.charset &&
+               prev.field.name == seg.field.name) {
+      prev.field.min_len += seg.field.min_len;
+      prev.field.max_len += seg.field.max_len;
+    } else {
+      out.push_back(std::move(seg));
+    }
+  }
+  return out;
+}
+
+// Promote literal segments that contain a listed tag followed by digits (e.g.
+// "@DT2026@LT" with tag "DT"): the tag stays as fixed text, the trailing digits
+// become a field, and the rest of the literal stays fixed. Constant stretches of
+// adjacent segments are merged by segmentation, so a literal may contain several
+// tag+value units; each listed tag is promoted in place.
+void apply_promotes(std::vector<SegmentRule>& segments, const std::vector<std::string>& tags) {
+  if (tags.empty()) return;
+  std::vector<SegmentRule> out;
+  for (auto& seg : segments) {
+    if (!seg.is_literal) {
+      out.push_back(std::move(seg));
+      continue;
+    }
+    std::string rest = seg.literal;
+    std::vector<SegmentRule> pieces;
+    bool promoted_any = false;
+    std::size_t cur = 0;
+    while (cur < rest.size()) {
+      std::size_t l = cur;
+      while (l < rest.size() && std::isalpha(static_cast<unsigned char>(rest[l]))) ++l;
+      if (l == cur) { ++cur; continue; }  // not a letter run
+      std::size_t d = l;
+      while (d < rest.size() && std::isdigit(static_cast<unsigned char>(rest[d]))) ++d;
+      std::string tag = rest.substr(cur, l - cur);
+      bool want = std::find(tags.begin(), tags.end(), tag) != tags.end();
+      if (want && d > l) {
+        if (cur > 0) {  // fixed text before the tag
+          SegmentRule f;
+          f.is_literal = true;
+          f.literal = rest.substr(0, cur);
+          pieces.push_back(std::move(f));
+        }
+        SegmentRule tag_seg;  // the tag itself stays fixed
+        tag_seg.is_literal = true;
+        tag_seg.literal = tag;
+        pieces.push_back(std::move(tag_seg));
+
+        SegmentRule field_seg;  // the value becomes a field
+        field_seg.is_literal = false;
+        field_seg.field.name = tag;
+        std::set<char> value_chars;
+        for (std::size_t k = l; k < d; ++k) value_chars.insert(rest[k]);
+        field_seg.field.charset = charset_for(value_chars);
+        field_seg.field.min_len = d - l;
+        field_seg.field.max_len = d - l;
+        pieces.push_back(std::move(field_seg));
+
+        rest = rest.substr(d);  // continue scanning the remainder
+        cur = 0;
+        promoted_any = true;
+        continue;
+      }
+      cur = (d > l) ? d : l;  // skip this tag+value unit untouched
+    }
+    if (!promoted_any) {
+      out.push_back(std::move(seg));
+      continue;
+    }
+    if (!rest.empty()) {  // trailing fixed text after the last promoted unit
+      SegmentRule f;
+      f.is_literal = true;
+      f.literal = rest;
+      pieces.push_back(std::move(f));
+    }
+    for (auto& p : pieces) out.push_back(std::move(p));
+  }
+  segments = std::move(out);
+}
+
+// Replace inferred field rules by field name (工单 05 rule-table editing).
+void apply_overrides(std::vector<SegmentRule>& segments, const std::vector<FieldRule>& overrides) {
+  if (overrides.empty()) return;
+  for (auto& seg : segments) {
+    if (seg.is_literal) continue;
+    for (const auto& ov : overrides) {
+      if (ov.name == seg.field.name) {
+        seg.field.charset = ov.charset;
+        seg.field.min_len = ov.min_len;
+        seg.field.max_len = ov.max_len;
+      }
+    }
+  }
+}
+
+// Length-mode fields get positional names (Field1…); when a field directly
+// follows a fixed chunk, name it after that chunk's tag instead.
+void name_fields_from_preceding_literals(std::vector<SegmentRule>& segments) {
+  int field_no = 0;
+  for (std::size_t i = 0; i < segments.size(); ++i) {
+    auto& seg = segments[i];
+    if (seg.is_literal) continue;
+    if (seg.field.name.rfind("Field", 0) == 0) {
+      std::string tag;
+      if (i > 0 && segments[i - 1].is_literal) tag = tag_from_literal(segments[i - 1].literal);
+      seg.field.name = tag.empty() ? "Field" + std::to_string(++field_no) : tag;
+    }
+  }
+}
+
 std::string compose_regex(const std::vector<SegmentRule>& segments) {
   std::string out = "^";
   for (const auto& seg : segments) {
@@ -270,8 +422,20 @@ GenerationResult generate(const Project& project) {
   }
   if (cleaned.empty()) return result;  // nothing to infer from
 
+  std::vector<SegmentRule> segments;
+  const auto& cfg = project.segment_config;
+  if (cfg.use_lengths && !cfg.lengths.empty()) {
+    segments = segment_by_lengths(cleaned, cfg.lengths, result.warnings);
+    name_fields_from_preceding_literals(segments);
+  } else {
+    segments = segment_positives(cleaned);
+  }
+  apply_promotes(segments, cfg.promote_tags);
+  segments = normalize_segments(std::move(segments));
+  apply_overrides(segments, cfg.field_overrides);
+
   Candidate candidate;
-  candidate.segments = segment_positives(cleaned);
+  candidate.segments = std::move(segments);
   candidate.regex = compose_regex(candidate.segments);
 
   CandidateVerdict vd;

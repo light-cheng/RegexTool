@@ -33,10 +33,19 @@ struct Candidate {
   std::vector<SegmentRule> segments; // in order, concatenation equals the regex
 };
 
+// Segmentation configuration (工单 05). Defaults = fully automatic.
+struct SegmentConfig {
+  bool use_lengths = false;                 // manual length-based segmentation
+  std::vector<std::size_t> lengths;         // chunk sizes when use_lengths
+  std::vector<std::string> promote_tags;    // literals whose tag is listed become fields
+  std::vector<FieldRule> field_overrides;   // override inferred field rules, keyed by name
+};
+
 // Input project: positives (must match the format) and negatives (must not).
 struct Project {
   std::vector<std::string> positives;
   std::vector<std::string> negatives;
+  SegmentConfig segment_config;
 };
 
 // Validation verdict for one example against one candidate.

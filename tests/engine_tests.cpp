@@ -345,6 +345,100 @@ void test_marker_segmentation_consistent_across_examples() {
   for (const auto& v : vd.positive_verdicts) CHECK(v.passed);
 }
 
+// ---- 工单 05: length-based segmentation, promote, overrides ----
+
+void test_length_based_segmentation() {
+  regex_tool::Project p;
+  p.positives = {"ABCD1234EF", "ABCD5678GH"};
+  p.segment_config.use_lengths = true;
+  p.segment_config.lengths = {4, 4, 2};
+  auto result = regex_tool::generate(p);
+  CHECK_EQ(first_regex(result), std::string("^ABCD\\d{4}[A-Z]{2}$"));
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  // Field names follow the preceding fixed chunk (the tag of "ABCD"); a field
+  // with no preceding literal keeps its positional name.
+  std::vector<std::string> names;
+  for (const auto& seg : vd.candidate.segments) {
+    if (!seg.is_literal) names.push_back(seg.field.name);
+  }
+  CHECK_EQ(names.size(), 2u);
+  if (names.size() == 2u) {
+    CHECK_EQ(names[0], "ABCD");
+    CHECK_EQ(names[1], "Field1");  // no preceding literal chunk; positional name
+  }
+}
+
+void test_length_based_short_example_warns() {
+  regex_tool::Project p;
+  p.positives = {"ABCD1234EF", "ABCD12"};  // second is shorter than 4+4+2
+  p.segment_config.use_lengths = true;
+  p.segment_config.lengths = {4, 4, 2};
+  auto result = regex_tool::generate(p);
+  CHECK(!result.warnings.empty());
+  CHECK_EQ(result.candidates.front().positive_verdicts.size(), 2u);
+}
+
+void test_promote_constant_segment_to_field_sq() {
+  // SQ000 decision payoff: promoting the "SQ" tag turns the constant "000" into
+  // a field and merges with the trailing digit field — the user's hand-written
+  // target regex comes out exactly.
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  p.segment_config.promote_tags = {"SQ"};
+  auto result = regex_tool::generate(p);
+  CHECK_EQ(first_regex(result),
+           std::string("^PN\\d{4}@BN\\d{4}@DT2026@LT\\d{4}@SQ\\d{4}@WK\\d{2}$"));
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  // Captures now include the full four digits of SQ.
+  const auto& v = vd.positive_verdicts.front();
+  CHECK_EQ(v.field_captures.size(), 5u);
+  if (v.field_captures.size() == 5u) {
+    CHECK_EQ(v.field_captures[3].first, "SQ");
+    CHECK_EQ(v.field_captures[3].second, "0001");
+  }
+}
+
+void test_promote_constant_segment_to_field_dt() {
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  p.segment_config.promote_tags = {"DT"};
+  auto result = regex_tool::generate(p);
+  CHECK_EQ(first_regex(result),
+           std::string("^PN\\d{4}@BN\\d{4}@DT\\d{4}@LT\\d{4}@SQ000\\d@WK\\d{2}$"));
+  CHECK(result.candidates.front().passes_all);
+}
+
+void test_field_override_by_name() {
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  regex_tool::FieldRule ov;
+  ov.name = "PN";
+  ov.charset = "[A-Z]";
+  ov.min_len = 3;
+  ov.max_len = 5;
+  p.segment_config.field_overrides = {ov};
+  auto result = regex_tool::generate(p);
+  CHECK_EQ(first_regex(result),
+           std::string("^PN[A-Z]{3,5}@BN\\d{4}@DT2026@LT\\d{4}@SQ000\\d@WK\\d{2}$"));
+  // The digit-only positives no longer satisfy the overridden letter rule.
+  CHECK(!result.candidates.front().passes_all);
+}
+
+void test_length_based_segmentation_with_promote() {
+  // Promote works in length mode too: the value of a constant chunk (tag AB +
+  // value 12) becomes a field while the tag stays fixed.
+  regex_tool::Project p;
+  p.positives = {"AB1234", "AB1234"};
+  p.segment_config.use_lengths = true;
+  p.segment_config.lengths = {4, 2};
+  p.segment_config.promote_tags = {"AB"};
+  auto result = regex_tool::generate(p);
+  CHECK_EQ(first_regex(result), std::string("^AB\\d{2}34$"));
+  CHECK(result.candidates.front().passes_all);
+}
+
 }  // namespace
 
 int main() {
@@ -368,6 +462,12 @@ int main() {
   test_alnum_marker_segmentation();
   test_single_segment_without_separator_or_marker();
   test_marker_segmentation_consistent_across_examples();
+  test_length_based_segmentation();
+  test_length_based_short_example_warns();
+  test_promote_constant_segment_to_field_sq();
+  test_promote_constant_segment_to_field_dt();
+  test_field_override_by_name();
+  test_length_based_segmentation_with_promote();
 
   if (g_failures == 0) {
     std::printf("ALL TESTS PASSED\n");
