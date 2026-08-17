@@ -141,8 +141,20 @@ void run_generate() {
   auto positives = collect_positives();
   auto result = regex_tool::generate(positives);
 
-  std::string text = "候选正则:\n" + result.candidate.regex + "\n\n正例验证:\n";
-  for (const auto& v : result.positive_verdicts) {
+  if (result.candidates.empty()) {
+    SetWindowTextW(g.result_edit, L"（请至少输入一条正例）");
+    return;
+  }
+  const auto& vd = result.candidates.front();
+
+  std::string text;
+  if (!result.warnings.empty()) {
+    text += "警告:\n";
+    for (const auto& w : result.warnings) text += "- " + w + "\n";
+    text += "\n";
+  }
+  text += "候选正则:\n" + vd.candidate.regex + "\n\n正例验证:\n";
+  for (const auto& v : vd.positive_verdicts) {
     text += v.passed ? "[通过] " : "[失败] ";
     text += v.example;
     if (!v.passed && v.failing_segment != SIZE_MAX) {
@@ -152,7 +164,7 @@ void run_generate() {
   }
   text += "\n分段:\n";
   int n = 0;
-  for (const auto& seg : result.candidate.segments) {
+  for (const auto& seg : vd.candidate.segments) {
     ++n;
     if (seg.is_literal) {
       text += std::to_string(n) + ". 固定: " + seg.literal + "\n";

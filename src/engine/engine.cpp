@@ -203,13 +203,17 @@ std::string compose_regex(const std::vector<SegmentRule>& segments) {
   return out;
 }
 
-ExampleVerdict verify(const Candidate& candidate, const std::string& example) {
+// Walk one example against the segment model: authoritative full-match plus a
+// segment-level diagnosis (where the walk first failed) and field captures.
+// `passed` is set to the positive polarity (passed == matched); callers flip it
+// for negatives.
+ExampleVerdict walk_verify(const Candidate& candidate, const std::string& example) {
   ExampleVerdict verdict;
   verdict.example = example;
 
   // Authoritative check: anchored full match with the same engine style we emit.
-  std::regex re(candidate.regex);
-  verdict.passed = std::regex_match(example, re);
+  verdict.matched = std::regex_match(example, std::regex(candidate.regex));
+  verdict.passed = verdict.matched;
 
   // Diagnostic + captures: greedy walk over the segment model.
   std::size_t pos = 0;
@@ -232,36 +236,70 @@ ExampleVerdict verify(const Candidate& candidate, const std::string& example) {
         first_fail = i;
         break;
       }
-      if (verdict.passed) {
+      if (verdict.matched) {
         verdict.field_captures.emplace_back(seg.field.name, example.substr(pos, run));
       }
       pos += run;
     }
   }
-  if (pos != example.size() && first_fail == SIZE_MAX) first_fail = SIZE_MAX;  // tail mismatch; keep SIZE_MAX
-  verdict.failing_segment = verdict.passed ? SIZE_MAX : first_fail;
+  verdict.failing_segment = verdict.matched ? SIZE_MAX : first_fail;
   return verdict;
 }
 
 }  // namespace
 
-GenerationResult generate(const std::vector<std::string>& positives) {
+ExampleVerdict verify_example(const Candidate& candidate, const std::string& example) {
+  // Self-test polarity: "does this barcode match?" — passed == matched.
+  return walk_verify(candidate, example);
+}
+
+GenerationResult generate(const Project& project) {
   GenerationResult result;
-  if (positives.empty()) {
-    result.candidate.regex = "^$";
-    return result;
+
+  // Input hygiene (工单 04): trim whitespace, report it, never fold it into rules.
+  std::vector<std::string> cleaned;
+  cleaned.reserve(project.positives.size());
+  std::size_t index = 0;
+  for (const auto& s : project.positives) {
+    ++index;
+    std::string t = trim_whitespace(s);
+    if (t != s) {
+      result.warnings.push_back("正例 " + std::to_string(index) + " 首尾有空白，已自动去除");
+    }
+    cleaned.push_back(t);
+  }
+  if (cleaned.empty()) return result;  // nothing to infer from
+
+  Candidate candidate;
+  candidate.segments = segment_positives(cleaned);
+  candidate.regex = compose_regex(candidate.segments);
+
+  CandidateVerdict vd;
+  vd.candidate = std::move(candidate);
+
+  for (const auto& s : cleaned) {
+    vd.positive_verdicts.push_back(walk_verify(vd.candidate, s));
+  }
+  for (const auto& s : project.negatives) {
+    auto v = walk_verify(vd.candidate, s);
+    v.passed = !v.matched;  // negative polarity: correctly rejected = passed
+    vd.negative_verdicts.push_back(std::move(v));
   }
 
-  std::vector<std::string> cleaned;
-  cleaned.reserve(positives.size());
-  for (const auto& s : positives) cleaned.push_back(trim_whitespace(s));
+  std::size_t failures = 0;
+  for (const auto& v : vd.positive_verdicts) if (!v.passed) ++failures;
+  for (const auto& v : vd.negative_verdicts) if (!v.passed) ++failures;
+  vd.failures = failures;
+  vd.passes_all = failures == 0;
 
-  result.candidate.segments = segment_positives(cleaned);
-  result.candidate.regex = compose_regex(result.candidate.segments);
-
-  result.positive_verdicts.reserve(cleaned.size());
-  for (const auto& s : cleaned) result.positive_verdicts.push_back(verify(result.candidate, s));
+  result.candidates.push_back(std::move(vd));
   return result;
+}
+
+GenerationResult generate(const std::vector<std::string>& positives) {
+  Project p;
+  p.positives = positives;
+  return generate(p);
 }
 
 }  // namespace regex_tool

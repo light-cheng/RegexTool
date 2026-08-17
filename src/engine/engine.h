@@ -1,8 +1,9 @@
 #pragma once
 
-// Core engine for the Regex Tool (工单 01 范围).
-// Pure logic, no UI dependency: positives in -> one candidate regex + per-example
-// validation verdicts out. Tests live at this seam only.
+// Core engine for the Regex Tool.
+// Pure logic, no UI dependency: a project (positives + negatives) in -> candidate
+// regexes + per-example validation verdicts + warnings out. Tests live at this
+// seam only.
 
 #include <cstddef>
 #include <string>
@@ -32,25 +33,49 @@ struct Candidate {
   std::vector<SegmentRule> segments; // in order, concatenation equals the regex
 };
 
-// Validation verdict for one example against a candidate.
+// Input project: positives (must match the format) and negatives (must not).
+struct Project {
+  std::vector<std::string> positives;
+  std::vector<std::string> negatives;
+};
+
+// Validation verdict for one example against one candidate.
 struct ExampleVerdict {
   std::string example;
-  bool passed = false;
-  // Index into Candidate::segments where the example first fails;
-  // SIZE_MAX when it passed. Diagnostic only (see field_captures for the real check).
+  bool passed = false;   // positive: regex matched; negative: regex did NOT match
+  bool matched = false;  // raw regex-match outcome (diagnostic)
+  // Index into Candidate::segments where the walk first failed (positive: where it
+  // stopped; negative: where it was rejected); SIZE_MAX when the example matched
+  // the whole regex (positive pass / negative leak).
   std::size_t failing_segment = SIZE_MAX;
   // Captured value per field, in field order, for this example.
   std::vector<std::pair<std::string, std::string>> field_captures;
 };
 
-struct GenerationResult {
+// Verdicts of one candidate against the whole project.
+struct CandidateVerdict {
   Candidate candidate;
   std::vector<ExampleVerdict> positive_verdicts;  // one per positive, same order
+  std::vector<ExampleVerdict> negative_verdicts;  // one per negative, same order
+  bool passes_all = false;  // every positive passes and every negative is rejected
+  std::size_t failures = 0; // positives failing + negatives leaking
 };
 
-// Generate one candidate from the given positives and validate it against them.
-// Leading/trailing whitespace of each positive is trimmed (explicit warnings are
-// a later ticket). Returns an empty candidate for empty input.
+struct GenerationResult {
+  std::vector<CandidateVerdict> candidates;
+  std::vector<std::string> warnings;  // input-hygiene warnings (工单 04)
+};
+
+// Generate candidates from the project and validate each against every example.
+// Leading/trailing whitespace of each example is trimmed; hygiene problems are
+// reported as warnings, never silently folded into the rules (工单 04).
+GenerationResult generate(const Project& project);
+
+// Convenience overload: positives only.
 GenerationResult generate(const std::vector<std::string>& positives);
+
+// Self-test (工单 07): judge one arbitrary barcode against a candidate using the
+// same verification logic as the project examples.
+ExampleVerdict verify_example(const Candidate& candidate, const std::string& example);
 
 }  // namespace regex_tool

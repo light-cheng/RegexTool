@@ -28,6 +28,16 @@ static int g_failures = 0;
     }                                                                     \
   } while (0)
 
+#define CHECK_NE(a, b)                                                    \
+  do {                                                                    \
+    auto va = (a);                                                        \
+    auto vb = (b);                                                        \
+    if (!(va != vb)) {                                                    \
+      std::printf("FAIL %s:%d: %s != %s\n", __FILE__, __LINE__, #a, #b);  \
+      ++g_failures;                                                       \
+    }                                                                     \
+  } while (0)
+
 namespace {
 
 // The user's real positive examples (field tags PN/BN/DT/LT/SQ/WK, "@" separators).
@@ -47,22 +57,31 @@ const std::vector<std::string> kRealExamples = {
 const char* kExpectedRegex =
     "^PN\\d{4}@BN\\d{4}@DT2026@LT\\d{4}@SQ000\\d@WK\\d{2}$";
 
+// The candidate regex of a result is its first (recommended) candidate.
+const std::string& first_regex(const regex_tool::GenerationResult& r) {
+  return r.candidates.front().candidate.regex;
+}
+
 void test_real_examples_produce_expected_regex() {
   auto result = regex_tool::generate(kRealExamples);
-  CHECK_EQ(result.candidate.regex, std::string(kExpectedRegex));
-  CHECK_EQ(result.positive_verdicts.size(), kRealExamples.size());
-  for (const auto& v : result.positive_verdicts) {
+  CHECK_EQ(first_regex(result), std::string(kExpectedRegex));
+  const auto& vd = result.candidates.front();
+  CHECK_EQ(vd.positive_verdicts.size(), kRealExamples.size());
+  for (const auto& v : vd.positive_verdicts) {
     CHECK(v.passed);
+    CHECK(v.matched);
     CHECK_EQ(v.failing_segment, SIZE_MAX);
   }
+  CHECK(vd.passes_all);
 }
 
 void test_field_names_and_rules_follow_tags() {
   auto result = regex_tool::generate(kRealExamples);
+  const auto& segments = result.candidates.front().candidate.segments;
   std::vector<std::string> names;
   std::vector<std::string> charsets;
   std::vector<std::pair<std::size_t, std::size_t>> lens;
-  for (const auto& seg : result.candidate.segments) {
+  for (const auto& seg : segments) {
     if (!seg.is_literal) {
       names.push_back(seg.field.name);
       charsets.push_back(seg.field.charset);
@@ -88,6 +107,7 @@ void test_field_names_and_rules_follow_tags() {
 
 void test_field_captures_match_actual_values() {
   auto result = regex_tool::generate(kRealExamples);
+  const auto& vd = result.candidates.front();
   // Fourth field captures only the varying digit; "000" stays in the literal.
   const std::vector<std::vector<std::string>> expected = {
       {"8821", "9012", "3344", "1", "12"},
@@ -96,8 +116,8 @@ void test_field_captures_match_actual_values() {
       {"6678", "5589", "9900", "4", "23"},
       {"3345", "1102", "4488", "5", "04"},
   };
-  for (std::size_t i = 0; i < result.positive_verdicts.size(); ++i) {
-    const auto& v = result.positive_verdicts[i];
+  for (std::size_t i = 0; i < vd.positive_verdicts.size(); ++i) {
+    const auto& v = vd.positive_verdicts[i];
     CHECK_EQ(v.field_captures.size(), expected[i].size());
     for (std::size_t j = 0; j < v.field_captures.size() && j < expected[i].size(); ++j) {
       CHECK_EQ(v.field_captures[j].second, expected[i][j]);
@@ -107,45 +127,179 @@ void test_field_captures_match_actual_values() {
 
 void test_varying_length_field_emits_range() {
   auto result = regex_tool::generate({"AB1", "AB22", "AB333"});
-  CHECK_EQ(result.candidate.regex, std::string("^AB\\d{1,3}$"));
-  for (const auto& v : result.positive_verdicts) CHECK(v.passed);
+  CHECK_EQ(first_regex(result), std::string("^AB\\d{1,3}$"));
+  const auto& vd = result.candidates.front();
+  for (const auto& v : vd.positive_verdicts) CHECK(v.passed);
+  CHECK(vd.passes_all);
 }
 
 void test_letter_charset_inferred() {
   auto result = regex_tool::generate({"XXabc", "XXxyz"});
   // Observed chars are all lowercase, so the class is tight: [a-z].
-  CHECK_EQ(result.candidate.regex, std::string("^XX[a-z]{3}$"));
+  CHECK_EQ(first_regex(result), std::string("^XX[a-z]{3}$"));
 }
 
 void test_literal_escaping() {
   auto result = regex_tool::generate({"A1.B2", "A3.B4"});
   // The separator "." is a literal; regex metacharacters must be escaped.
-  CHECK_EQ(result.candidate.regex, std::string("^A\\d\\.B\\d$"));
+  CHECK_EQ(first_regex(result), std::string("^A\\d\\.B\\d$"));
 }
 
 void test_all_identical_positives_emit_literal_regex() {
   auto result = regex_tool::generate({"FOO", "FOO"});
-  CHECK_EQ(result.candidate.regex, std::string("^FOO$"));
-  for (const auto& v : result.positive_verdicts) CHECK(v.passed);
+  CHECK_EQ(first_regex(result), std::string("^FOO$"));
+  const auto& vd = result.candidates.front();
+  for (const auto& v : vd.positive_verdicts) CHECK(v.passed);
+  CHECK(vd.passes_all);
 }
 
 void test_single_field_when_no_constant_positions() {
   auto result = regex_tool::generate({"abc", "xyz"});
-  CHECK_EQ(result.candidate.regex, std::string("^[a-z]{3}$"));
+  CHECK_EQ(first_regex(result), std::string("^[a-z]{3}$"));
 }
 
-void test_leading_trailing_whitespace_trimmed() {
+void test_leading_trailing_whitespace_trimmed_with_warning() {
   // Real data came in with a trailing space on one example; it must not leak
-  // into the rules (explicit warnings arrive with a later ticket).
+  // into the rules (工单 04: the trim surfaces as an explicit warning).
   auto result = regex_tool::generate({"AB12 ", " AB34"});
-  CHECK_EQ(result.candidate.regex, std::string("^AB\\d{2}$"));
-  for (const auto& v : result.positive_verdicts) CHECK(v.passed);
+  CHECK_EQ(first_regex(result), std::string("^AB\\d{2}$"));
+  const auto& vd = result.candidates.front();
+  for (const auto& v : vd.positive_verdicts) CHECK(v.passed);
+  CHECK(!result.warnings.empty());
+  bool found = false;
+  for (const auto& w : result.warnings) {
+    if (w.find("空格") != std::string::npos || w.find("空白") != std::string::npos) found = true;
+  }
+  CHECK(found);
 }
 
 void test_empty_input_returns_empty_candidate() {
-  auto result = regex_tool::generate({});
-  CHECK_EQ(result.candidate.regex, std::string("^$"));
-  CHECK_EQ(result.positive_verdicts.size(), 0u);
+  auto result = regex_tool::generate(regex_tool::Project{});
+  CHECK_EQ(result.candidates.size(), 0u);
+}
+
+// ---- 工单 02: negatives ----
+
+void test_negative_with_different_structure_rejected() {
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  p.negatives = {"THIS-IS-NOT-A-BARCODE", "PN8821@BN9012"};  // wrong shape / truncated
+  auto result = regex_tool::generate(p);
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  CHECK_EQ(vd.failures, 0u);
+  CHECK_EQ(vd.negative_verdicts.size(), 2u);
+  for (const auto& v : vd.negative_verdicts) {
+    CHECK(v.passed);       // correctly rejected
+    CHECK(!v.matched);
+    CHECK_NE(v.failing_segment, SIZE_MAX);  // the walk points at where it was rejected
+  }
+}
+
+void test_negative_with_invalid_field_content_points_at_field() {
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  // Same structure, but the PN field (4 digits) contains a letter -> rejected
+  // by the field rule, and the verdict must point at the PN segment.
+  p.negatives = {"PN88A1@BN9012@DT2026@LT3344@SQ0001@WK12"};
+  auto result = regex_tool::generate(p);
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  const auto& v = vd.negative_verdicts.front();
+  CHECK(v.passed);  // rejected, which is what we want for a negative
+  CHECK(!v.matched);
+  CHECK_NE(v.failing_segment, SIZE_MAX);
+  // The segment it points at must be the PN field.
+  if (v.failing_segment != SIZE_MAX) {
+    const auto& seg = vd.candidate.segments[v.failing_segment];
+    CHECK(!seg.is_literal);
+    CHECK_EQ(seg.field.name, "PN");
+  }
+}
+
+void test_negative_that_matches_is_a_leak() {
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  // This negative is actually a valid barcode of the same format: it must leak.
+  p.negatives = {"PN9999@BN8888@DT2026@LT7777@SQ0006@WK99"};
+  auto result = regex_tool::generate(p);
+  const auto& vd = result.candidates.front();
+  CHECK(!vd.passes_all);
+  CHECK_EQ(vd.failures, 1u);
+  const auto& v = vd.negative_verdicts.front();
+  CHECK(!v.passed);
+  CHECK(v.matched);
+  CHECK_EQ(v.failing_segment, SIZE_MAX);  // whole string matched
+}
+
+void test_promoted_sq_field_accepts_any_digit_four() {
+  // The honest inference keeps "000" fixed; with the SQ tag promoted to a field
+  // (工单 05 machinery exercised via overrides), SQ must be \d{4} and a barcode
+  // with a different prefix still matches. This pins the verify side used by
+  // the self-test box: a candidate regex is judged as-is.
+  regex_tool::Candidate c;
+  c.regex = "^PN\\d{4}@BN\\d{4}@DT2026@LT\\d{4}@SQ\\d{4}@WK\\d{2}$";
+  c.segments = {
+      {true, "PN", {}},             {false, "", {"PN", "\\d", 4, 4}},
+      {true, "@BN", {}},            {false, "", {"BN", "\\d", 4, 4}},
+      {true, "@DT2026", {}},        {true, "@LT", {}},
+      {false, "", {"LT", "\\d", 4, 4}}, {true, "@SQ", {}},
+      {false, "", {"SQ", "\\d", 4, 4}}, {true, "@WK", {}},
+      {false, "", {"WK", "\\d", 2, 2}},
+  };
+  auto ok = regex_tool::verify_example(c, "PN1234@BN5678@DT2026@LT9012@SQ0007@WK42");
+  CHECK(ok.passed);
+  CHECK(ok.matched);
+  auto bad = regex_tool::verify_example(c, "PN1234@BN5678@DT2025@LT9012@SQ0007@WK42");
+  CHECK(!bad.passed);
+  CHECK(!bad.matched);
+}
+
+// ---- 工单 07: self-test via the same verification logic ----
+
+void test_verify_example_pass_and_fail_with_segment() {
+  auto result = regex_tool::generate(kRealExamples);
+  const auto& c = result.candidates.front().candidate;
+
+  auto pass = regex_tool::verify_example(c, "PN9999@BN8888@DT2026@LT7777@SQ0006@WK99");
+  CHECK(pass.passed);
+  CHECK_EQ(pass.failing_segment, SIZE_MAX);
+  CHECK_EQ(pass.field_captures.size(), 5u);
+  if (pass.field_captures.size() == 5u) {
+    CHECK_EQ(pass.field_captures[0].second, "9999");
+    CHECK_EQ(pass.field_captures[4].second, "99");
+  }
+
+  auto fail_structure = regex_tool::verify_example(c, "NO-SEPARATOR-HERE");
+  CHECK(!fail_structure.passed);
+  CHECK_NE(fail_structure.failing_segment, SIZE_MAX);
+
+  auto fail_field = regex_tool::verify_example(c, "PN88A1@BN9012@DT2026@LT3344@SQ0001@WK12");
+  CHECK(!fail_field.passed);
+  CHECK_NE(fail_field.failing_segment, SIZE_MAX);
+  if (fail_field.failing_segment != SIZE_MAX) {
+    const auto& seg = c.segments[fail_field.failing_segment];
+    CHECK(!seg.is_literal);
+    CHECK_EQ(seg.field.name, "PN");
+  }
+}
+
+// ---- 工单 04: non-ASCII preserved ----
+
+void test_non_ascii_preserved_in_literal() {
+  auto result = regex_tool::generate({"ABC\xC3\xA9" "12", "ABC\xC3\xA9" "34"});  // "ABCé12"
+  CHECK_EQ(first_regex(result), std::string("^ABC\xC3\xA9" "\\d{2}$"));
+  const auto& vd = result.candidates.front();
+  for (const auto& v : vd.positive_verdicts) CHECK(v.passed);
+}
+
+void test_empty_negatives_ok() {
+  regex_tool::Project p;
+  p.positives = kRealExamples;
+  auto result = regex_tool::generate(p);
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  CHECK_EQ(vd.negative_verdicts.size(), 0u);
 }
 
 }  // namespace
@@ -159,8 +313,15 @@ int main() {
   test_literal_escaping();
   test_all_identical_positives_emit_literal_regex();
   test_single_field_when_no_constant_positions();
-  test_leading_trailing_whitespace_trimmed();
+  test_leading_trailing_whitespace_trimmed_with_warning();
   test_empty_input_returns_empty_candidate();
+  test_negative_with_different_structure_rejected();
+  test_negative_with_invalid_field_content_points_at_field();
+  test_negative_that_matches_is_a_leak();
+  test_promoted_sq_field_accepts_any_digit_four();
+  test_verify_example_pass_and_fail_with_segment();
+  test_non_ascii_preserved_in_literal();
+  test_empty_negatives_ok();
 
   if (g_failures == 0) {
     std::printf("ALL TESTS PASSED\n");
