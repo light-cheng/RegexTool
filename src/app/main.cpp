@@ -166,6 +166,8 @@ void layout(HWND hwnd);
 
 // Next free control id in the given base range: ids are never reused, so a
 // deleted row's ids are not handed out again (deletion locates rows by handle).
+// Scans all four row vectors; the range filter keeps each id family separate
+// (2000s=pos edits, 3000s=pos del, 4000s=neg edits, 5000s=neg del).
 int next_free_id(int base) {
   int best = base;
   auto scan = [&](const std::vector<HWND>& hs) {
@@ -175,7 +177,9 @@ int next_free_id(int base) {
     }
   };
   scan(g.pos_edits);
+  scan(g.pos_dels);
   scan(g.neg_edits);
+  scan(g.neg_dels);
   return best;
 }
 
@@ -1062,11 +1066,11 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (id == IDC_MODE_LEN) { set_mode(2); return 0; }
       if (id == IDC_GENERATE) { run_generate(hwnd); return 0; }
       if (id == IDC_SELFTEST_BTN) { run_selftest(); return 0; }
-      if (id >= IDC_POS_DEL_BASE && id < IDC_POS_DEL_BASE + 10000) {
+      if (id >= IDC_POS_DEL_BASE && id < IDC_POS_DEL_BASE + 1000) {
         remove_example_row(hwnd, false, reinterpret_cast<HWND>(lParam));
         return 0;
       }
-      if (id >= IDC_NEG_DEL_BASE && id < IDC_NEG_DEL_BASE + 10000) {
+      if (id >= IDC_NEG_DEL_BASE && id < IDC_NEG_DEL_BASE + 1000) {
         remove_example_row(hwnd, true, reinterpret_cast<HWND>(lParam));
         return 0;
       }
@@ -1111,6 +1115,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
   WNDCLASSW wc{};
+  // A background brush is required: without it the window never erases its
+  // background, so every control move leaves a ghost image at the old position
+  // and the UI looks smeared together when rows are added.
+  wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
   wc.lpfnWndProc = wnd_proc;
   wc.hInstance = hInstance;
   wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
@@ -1118,6 +1126,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
   RegisterClassW(&wc);
 
   WNDCLASSW bc{};
+  bc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
   bc.lpfnWndProc = batch_proc;
   bc.hInstance = hInstance;
   bc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
@@ -1125,7 +1134,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
   RegisterClassW(&bc);
 
   g_main_hwnd = CreateWindowExW(0, L"RegexToolMain", L"条码正则生成器",
-                                WS_OVERLAPPEDWINDOW | WS_VSCROLL,
+                                WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 940, 640,
                                 nullptr, nullptr, hInstance, nullptr);
   ShowWindow(g_main_hwnd, nCmdShow);
