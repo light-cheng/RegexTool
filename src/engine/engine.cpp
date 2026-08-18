@@ -9,22 +9,13 @@ namespace regex_tool {
 
 namespace {
 
-std::string trim_whitespace(const std::string& s) {
-  auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-  std::size_t b = 0;
-  std::size_t e = s.size();
-  while (b < e && is_space(s[b])) ++b;
-  while (e > b && is_space(s[e - 1])) --e;
-  return s.substr(b, e - b);
-}
-
 std::string escape_literal(const std::string& s) {
   std::string out;
   for (char c : s) {
     switch (c) {
       case '\\': case '.': case '^': case '$': case '[': case ']':
       case '(': case ')': case '{': case '}': case '*': case '+':
-      case '?': case '|': case '-':
+      case '?': case '|':
         out += '\\';
         out += c;
         break;
@@ -71,24 +62,7 @@ std::string charset_for(const std::set<char>& chars) {
   return cls;
 }
 
-bool charset_matches(const std::string& frag, char c) {
-  unsigned char u = static_cast<unsigned char>(c);
-  if (frag == "\\d") return std::isdigit(u) != 0;
-  if (frag == "[A-Z]") return std::isupper(u) != 0;
-  if (frag == "[a-z]") return std::islower(u) != 0;
-  if (frag == "[A-Za-z]") return std::isalpha(u) != 0;
-  if (frag == "[A-Z0-9]") return std::isupper(u) != 0 || std::isdigit(u) != 0;
-  if (frag == "[a-z0-9]") return std::islower(u) != 0 || std::isdigit(u) != 0;
-  if (frag == "[A-Za-z0-9]") return std::isalnum(u) != 0;
-  if (frag.size() >= 2 && frag.front() == '[' && frag.back() == ']') {
-    for (std::size_t i = 1; i + 1 < frag.size(); ++i) {
-      char cc = frag[i];
-      if (cc == '\\' && i + 2 < frag.size()) { cc = frag[++i]; }
-      if (cc == c) return true;
-    }
-  }
-  return false;
-}
+
 
 // Field name = the trailing run of letters of the literal that precedes it,
 // tolerating trailing digits (e.g. "@BN" -> "BN", "@DT2026@LT" -> "LT",
@@ -442,6 +416,30 @@ std::string compose_regex(const std::vector<SegmentRule>& segments) {
   return out;
 }
 
+std::string compose_capturing_regex(const std::vector<SegmentRule>& segments) {
+  std::string out = "^";
+  for (const auto& seg : segments) {
+    if (seg.is_literal) {
+      out += escape_literal(seg.literal);
+    } else {
+      out += "(";
+      out += seg.field.charset;
+      if (seg.field.min_len == 1 && seg.field.max_len == 1) {
+        // bare class, e.g. \d — {1} would be noise
+      } else if (seg.field.max_len == SIZE_MAX) {
+        out += "{" + std::to_string(seg.field.min_len) + ",}";  // relaxed length
+      } else if (seg.field.min_len == seg.field.max_len) {
+        out += "{" + std::to_string(seg.field.min_len) + "}";
+      } else {
+        out += "{" + std::to_string(seg.field.min_len) + "," + std::to_string(seg.field.max_len) + "}";
+      }
+      out += ")";
+    }
+  }
+  out += "$";
+  return out;
+}
+
 // Broaden an observed-only charset for the "broadened" variant (工单 06).
 std::string widen_charset(const std::string& cs) {
   if (cs == "\\d" || cs == "[0-9]") return "[A-Z0-9]";
@@ -461,11 +459,55 @@ ExampleVerdict walk_verify(const Candidate& candidate, const std::string& exampl
   ExampleVerdict verdict;
   verdict.example = example;
 
-  // Authoritative check: anchored full match with the same engine style we emit.
-  verdict.matched = std::regex_match(example, std::regex(candidate.regex));
-  verdict.passed = verdict.matched;
+  // Authoritative check with capture groups for precise field extraction (P3-1).
+  // Wrapped in try/catch to protect against invalid regex construction (P0-1).
+  bool matched = false;
+  if (!candidate.segments.empty()) {
+    try {
+      std::string cap_re = compose_capturing_regex(candidate.segments);
+      std::regex re(cap_re);
+      std::smatch m;
+      if (std::regex_match(example, m, re)) {
+        matched = true;
+        verdict.matched = true;
+        verdict.passed = true;
+        verdict.failing_segment = SIZE_MAX;
+        std::size_t field_idx = 1;
+        for (const auto& seg : candidate.segments) {
+          if (!seg.is_literal) {
+            if (field_idx < m.size()) {
+              verdict.field_captures.emplace_back(seg.field.name, m[field_idx].str());
+              ++field_idx;
+            }
+          }
+        }
+        return verdict;
+      }
+    } catch (const std::regex_error&) {
+      matched = false;
+    } catch (const std::exception&) {
+      matched = false;
+    }
+  } else if (!candidate.regex.empty()) {
+    try {
+      matched = std::regex_match(example, std::regex(candidate.regex));
+    } catch (const std::regex_error&) {
+      matched = false;
+    } catch (const std::exception&) {
+      matched = false;
+    }
+    if (matched) {
+      verdict.matched = true;
+      verdict.passed = true;
+      verdict.failing_segment = SIZE_MAX;
+      return verdict;
+    }
+  }
 
-  // Diagnostic + captures: greedy walk over the segment model.
+  verdict.matched = false;
+  verdict.passed = false;
+
+  // Diagnostic: greedy walk over the segment model to identify first failing segment.
   std::size_t pos = 0;
   std::size_t first_fail = SIZE_MAX;
   for (std::size_t i = 0; i < candidate.segments.size(); ++i) {
@@ -486,13 +528,10 @@ ExampleVerdict walk_verify(const Candidate& candidate, const std::string& exampl
         first_fail = i;
         break;
       }
-      if (verdict.matched) {
-        verdict.field_captures.emplace_back(seg.field.name, example.substr(pos, run));
-      }
       pos += run;
     }
   }
-  verdict.failing_segment = verdict.matched ? SIZE_MAX : first_fail;
+  verdict.failing_segment = first_fail;
   return verdict;
 }
 
@@ -520,7 +559,7 @@ GenerationResult generate(const Project& project) {
   std::size_t index = 0;
   for (const auto& s : project.positives) {
     ++index;
-    std::string t = trim_whitespace(s);
+    std::string t = trim(s);
     if (t != s) {
       result.warnings.push_back("正例 " + std::to_string(index) + " 首尾有空白，已自动去除");
     }
@@ -623,6 +662,79 @@ GenerationResult generate(const std::vector<std::string>& positives) {
   Project p;
   p.positives = positives;
   return generate(p);
+}
+
+std::string trim(const std::string& s) {
+  auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+  std::size_t b = 0;
+  std::size_t e = s.size();
+  while (b < e && is_space(s[b])) ++b;
+  while (e > b && is_space(s[e - 1])) --e;
+  return s.substr(b, e - b);
+}
+
+bool charset_matches(const std::string& frag, char c) {
+  unsigned char u = static_cast<unsigned char>(c);
+  if (frag == "\\d") return std::isdigit(u) != 0;
+  if (frag == "\\w") return std::isalnum(u) != 0 || c == '_';
+  if (frag == "\\s") return std::isspace(u) != 0;
+  if (frag == "[A-Z]") return std::isupper(u) != 0;
+  if (frag == "[a-z]") return std::islower(u) != 0;
+  if (frag == "[A-Za-z]") return std::isalpha(u) != 0;
+  if (frag == "[A-Z0-9]") return std::isupper(u) != 0 || std::isdigit(u) != 0;
+  if (frag == "[a-z0-9]") return std::islower(u) != 0 || std::isdigit(u) != 0;
+  if (frag == "[A-Za-z0-9]") return std::isalnum(u) != 0;
+
+  if (frag.size() >= 2 && frag.front() == '[' && frag.back() == ']') {
+    bool invert = (frag.size() >= 3 && frag[1] == '^');
+    std::size_t i = invert ? 2 : 1;
+    bool matched = false;
+    while (i + 1 < frag.size()) {
+      char ch = frag[i];
+      bool is_escaped = false;
+      if (ch == '\\' && i + 2 < frag.size()) {
+        is_escaped = true;
+        char next_ch = frag[i + 1];
+        if (next_ch == 'd') {
+          if (std::isdigit(u)) matched = true;
+          i += 2;
+          continue;
+        } else if (next_ch == 'w') {
+          if (std::isalnum(u) || c == '_') matched = true;
+          i += 2;
+          continue;
+        } else if (next_ch == 's') {
+          if (std::isspace(u)) matched = true;
+          i += 2;
+          continue;
+        } else {
+          ch = next_ch;
+        }
+      }
+
+      std::size_t next_pos = i + (is_escaped ? 2 : 1);
+      // Check for range like A-Z or 0-9
+      if (next_pos + 1 < frag.size() && frag[next_pos] == '-' && frag[next_pos + 1] != ']') {
+        char end_ch = frag[next_pos + 1];
+        std::size_t range_end_pos = next_pos + 2;
+        if (end_ch == '\\' && next_pos + 2 < frag.size()) {
+          end_ch = frag[next_pos + 2];
+          range_end_pos = next_pos + 3;
+        }
+        if (u >= static_cast<unsigned char>(ch) && u <= static_cast<unsigned char>(end_ch)) {
+          matched = true;
+        }
+        i = range_end_pos;
+      } else {
+        if (c == ch) {
+          matched = true;
+        }
+        i = next_pos;
+      }
+    }
+    return invert ? !matched : matched;
+  }
+  return false;
 }
 
 }  // namespace regex_tool

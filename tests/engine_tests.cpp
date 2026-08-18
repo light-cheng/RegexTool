@@ -8,7 +8,46 @@
 #include <string>
 #include <vector>
 
+#include <sstream>
+
 static int g_failures = 0;
+
+template <typename T>
+std::string format_val(const T& val) {
+  std::ostringstream oss;
+  oss << val;
+  return oss.str();
+}
+
+inline std::string format_val(const std::string& val) {
+  return "\"" + val + "\"";
+}
+
+inline std::string format_val(const char* val) {
+  return val ? ("\"" + std::string(val) + "\"") : "nullptr";
+}
+
+inline std::string format_val(bool val) {
+  return val ? "true" : "false";
+}
+
+template <typename A, typename B>
+void check_eq_impl(const char* file, int line, const char* a_str, const char* b_str, const A& a, const B& b) {
+  if (!(a == b)) {
+    std::printf("FAIL %s:%d: %s == %s [actual: %s, expected: %s]\n",
+                file, line, a_str, b_str, format_val(a).c_str(), format_val(b).c_str());
+    ++g_failures;
+  }
+}
+
+template <typename A, typename B>
+void check_ne_impl(const char* file, int line, const char* a_str, const char* b_str, const A& a, const B& b) {
+  if (!(a != b)) {
+    std::printf("FAIL %s:%d: %s != %s [both are: %s]\n",
+                file, line, a_str, b_str, format_val(a).c_str());
+    ++g_failures;
+  }
+}
 
 #define CHECK(cond)                                                       \
   do {                                                                    \
@@ -18,25 +57,8 @@ static int g_failures = 0;
     }                                                                     \
   } while (0)
 
-#define CHECK_EQ(a, b)                                                    \
-  do {                                                                    \
-    auto va = (a);                                                        \
-    auto vb = (b);                                                        \
-    if (!(va == vb)) {                                                    \
-      std::printf("FAIL %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b);  \
-      ++g_failures;                                                       \
-    }                                                                     \
-  } while (0)
-
-#define CHECK_NE(a, b)                                                    \
-  do {                                                                    \
-    auto va = (a);                                                        \
-    auto vb = (b);                                                        \
-    if (!(va != vb)) {                                                    \
-      std::printf("FAIL %s:%d: %s != %s\n", __FILE__, __LINE__, #a, #b);  \
-      ++g_failures;                                                       \
-    }                                                                     \
-  } while (0)
+#define CHECK_EQ(a, b) check_eq_impl(__FILE__, __LINE__, #a, #b, (a), (b))
+#define CHECK_NE(a, b) check_ne_impl(__FILE__, __LINE__, #a, #b, (a), (b))
 
 namespace {
 
@@ -570,6 +592,62 @@ void test_none_pass_fallback_keeps_closest() {
   CHECK(leak_found);
 }
 
+void test_invalid_regex_no_crash() {
+  regex_tool::Candidate c;
+  c.regex = "^PN[0-9";  // unclosed bracket
+  c.segments = {{true, "PN", {}}, {false, "", {"F1", "[0-9", 1, 1}}};
+  auto v = regex_tool::verify_example(c, "PN1");
+  CHECK(!v.passed);
+  CHECK(!v.matched);
+}
+
+void test_charset_matches_ranges_and_custom_classes() {
+  CHECK(regex_tool::charset_matches("[0-9A-F]", '0'));
+  CHECK(regex_tool::charset_matches("[0-9A-F]", '9'));
+  CHECK(regex_tool::charset_matches("[0-9A-F]", 'A'));
+  CHECK(regex_tool::charset_matches("[0-9A-F]", 'F'));
+  CHECK(!regex_tool::charset_matches("[0-9A-F]", 'G'));
+  CHECK(!regex_tool::charset_matches("[0-9A-F]", 'a'));
+
+  CHECK(regex_tool::charset_matches("[a-z0-9]", 'a'));
+  CHECK(regex_tool::charset_matches("[a-z0-9]", 'z'));
+  CHECK(regex_tool::charset_matches("[a-z0-9]", '5'));
+  CHECK(!regex_tool::charset_matches("[a-z0-9]", 'A'));
+
+  CHECK(regex_tool::charset_matches("[^0-9]", 'A'));
+  CHECK(!regex_tool::charset_matches("[^0-9]", '3'));
+}
+
+void test_field_captures_adjacent_fields() {
+  regex_tool::Candidate c;
+  c.regex = "^\\d{2}\\d{3}$";
+  c.segments = {
+      {false, "", {"F1", "\\d", 2, 2}},
+      {false, "", {"F2", "\\d", 3, 3}},
+  };
+  auto v = regex_tool::verify_example(c, "12345");
+  CHECK(v.passed);
+  CHECK_EQ(v.field_captures.size(), 2u);
+  if (v.field_captures.size() == 2u) {
+    CHECK_EQ(v.field_captures[0].first, "F1");
+    CHECK_EQ(v.field_captures[0].second, "12");
+    CHECK_EQ(v.field_captures[1].first, "F2");
+    CHECK_EQ(v.field_captures[1].second, "345");
+  }
+}
+
+void test_literal_hyphen_not_escaped() {
+  auto result = regex_tool::generate({"A-1", "A-2"});
+  CHECK_EQ(first_regex(result), std::string("^A-\\d$"));
+  CHECK(result.candidates.front().passes_all);
+}
+
+void test_trim_utility() {
+  CHECK_EQ(regex_tool::trim("  hello \r\n\t"), std::string("hello"));
+  CHECK_EQ(regex_tool::trim(""), std::string(""));
+  CHECK_EQ(regex_tool::trim("abc"), std::string("abc"));
+}
+
 }  // namespace
 
 int main() {
@@ -607,6 +685,11 @@ int main() {
   test_separator_position_mismatch_falls_back_with_warning();
   test_separator_mode_with_promote_sq();
   test_none_pass_fallback_keeps_closest();
+  test_invalid_regex_no_crash();
+  test_charset_matches_ranges_and_custom_classes();
+  test_field_captures_adjacent_fields();
+  test_literal_hyphen_not_escaped();
+  test_trim_utility();
 
   if (g_failures == 0) {
     std::printf("ALL TESTS PASSED\n");

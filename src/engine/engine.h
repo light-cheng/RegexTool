@@ -96,4 +96,10 @@ ExampleVerdict verify_example(const Candidate& candidate, const std::string& exa
 // immediately followed by digits, e.g. "@DT2026@LT" -> {"DT"}.
 std::vector<std::string> promotable_tags(const std::string& literal);
 
+// Utility: trim leading and trailing whitespace (\r, \n, \t, space).
+std::string trim(const std::string& s);
+
+// Utility: test whether a character matches a charset fragment (e.g. \d, [A-Z], [0-9A-F]).
+bool charset_matches(const std::string& frag, char c);
+
 }  // namespace regex_tool
