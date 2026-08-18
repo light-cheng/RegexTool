@@ -1,6 +1,6 @@
 // Win32 UI for the Regex Tool.
-// Modern Windows UI with DPI awareness, Visual Styles, accelerators,
-// responsive adaptive split, and robust error handling.
+// Modern Windows UI with DPI awareness, Visual Styles, isolated scroll viewport,
+// dedicated recommended regex highlight box, and structured validation details.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "engine/engine.h"
+#include "resource.h"
 
 #ifndef ECM_FIRST
 #define ECM_FIRST 0x1500
@@ -33,21 +34,23 @@ constexpr int IDC_PROJECT_EDIT = 1000;
 constexpr int IDC_NEW = 1001;
 constexpr int IDC_SAVE = 1002;
 constexpr int IDC_LOAD = 1003;
-constexpr int IDC_ADD_POS = 1004;
-constexpr int IDC_ADD_NEG = 1005;
-constexpr int IDC_BATCH_POS = 1006;
-constexpr int IDC_BATCH_NEG = 1007;
-constexpr int IDC_MODE_AUTO = 1008;
-constexpr int IDC_MODE_SEP = 1009;
-constexpr int IDC_MODE_LEN = 1010;
-constexpr int IDC_SEP_EDIT = 1011;
-constexpr int IDC_SEG_COUNT_COMBO = 1012;
-constexpr int IDC_GENERATE = 1013;
-constexpr int IDC_RESULT_EDIT = 1014;
-constexpr int IDC_COPY_REGEX = 1015;
-constexpr int IDC_SELFTEST_EDIT = 1016;
-constexpr int IDC_SELFTEST_BTN = 1017;
-constexpr int IDC_STATUSBAR = 1018;
+constexpr int IDC_SCROLL_CONTAINER = 1004;
+constexpr int IDC_ADD_POS = 1005;
+constexpr int IDC_ADD_NEG = 1006;
+constexpr int IDC_BATCH_POS = 1007;
+constexpr int IDC_BATCH_NEG = 1008;
+constexpr int IDC_MODE_AUTO = 1009;
+constexpr int IDC_MODE_SEP = 1010;
+constexpr int IDC_MODE_LEN = 1011;
+constexpr int IDC_SEP_EDIT = 1012;
+constexpr int IDC_SEG_COUNT_COMBO = 1013;
+constexpr int IDC_GENERATE = 1014;
+constexpr int IDC_REC_REGEX_EDIT = 1015;
+constexpr int IDC_COPY_REGEX = 1016;
+constexpr int IDC_RESULT_EDIT = 1017;
+constexpr int IDC_SELFTEST_EDIT = 1018;
+constexpr int IDC_SELFTEST_BTN = 1019;
+constexpr int IDC_STATUSBAR = 1020;
 
 // Dynamic rows ID intervals
 constexpr int IDC_POS_EDIT_BASE = 2000;      // 2000 .. 2499
@@ -59,9 +62,9 @@ constexpr int IDC_SEG_PROMOTE_BASE = 4500;   // 4500 .. 4999
 constexpr int IDC_LEN_BASE = 5000;           // 5000 .. 5499
 
 // Base metrics at 96 DPI (scaled dynamically with window DPI)
-constexpr int BASE_LEFT_MARGIN = 12;
-constexpr int BASE_ROW_H = 30;
-constexpr int BASE_CTRL_H = 24;
+constexpr int BASE_LEFT_MARGIN = 14;
+constexpr int BASE_ROW_H = 32;
+constexpr int BASE_CTRL_H = 25;
 constexpr int BASE_DEL_W = 28;
 constexpr std::size_t LEN_PER_LINE = 5;
 
@@ -84,20 +87,27 @@ UINT get_window_dpi(HWND hwnd) {
 }
 
 struct AppState {
-  HWND hwnd = nullptr;
+  HWND main_hwnd = nullptr;
+  HWND scroll_container = nullptr;
   UINT dpi = 96;
 
   // Modern UI Brushes & Fonts
   HBRUSH bg_brush = nullptr;
   HBRUSH edit_bg_brush = nullptr;
   HBRUSH readonly_bg_brush = nullptr;
+  HBRUSH rec_bg_brush = nullptr;
+
   HFONT font = nullptr;
   HFONT bold_font = nullptr;
   HFONT header_font = nullptr;
+  HFONT mono_font = nullptr;
+  HFONT mono_bold_font = nullptr;
 
-  // Controls - Left Pane
+  // Controls - Fixed Left Pane Header
   HWND project_combo = nullptr;
   HWND new_btn = nullptr, save_btn = nullptr, load_btn = nullptr;
+
+  // Controls - Scrollable Viewport (Children of scroll_container)
   HWND pos_label = nullptr, neg_label = nullptr, cfg_label = nullptr;
   HWND mode_auto = nullptr, mode_sep = nullptr, mode_len = nullptr;
   HWND sep_label = nullptr, sep_edit = nullptr;
@@ -107,14 +117,19 @@ struct AppState {
   std::vector<HWND> neg_edits, neg_dels;
   HWND add_pos = nullptr, add_neg = nullptr, batch_pos = nullptr, batch_neg = nullptr;
   std::vector<HWND> seg_edits, seg_promote_btns;
+
+  // Controls - Fixed Left Pane Footer
   HWND generate_btn = nullptr;
 
   // Controls - Right Pane
-  HWND result_header_label = nullptr;
+  HWND rec_header_label = nullptr;
   HWND copy_btn = nullptr;
+  HWND rec_regex_edit = nullptr;
+  HWND result_header_label = nullptr;
   HWND result_edit = nullptr;
-  HWND selftest_label = nullptr;
+  HWND selftest_title = nullptr;
   HWND selftest_edit = nullptr, selftest_btn = nullptr;
+  HWND selftest_label = nullptr;
 
   // Status Bar
   HWND status_bar = nullptr;
@@ -135,11 +150,12 @@ struct AppState {
   }
 
   void init_resources(HWND window_hwnd) {
-    hwnd = window_hwnd;
-    dpi = get_window_dpi(hwnd);
+    main_hwnd = window_hwnd;
+    dpi = get_window_dpi(main_hwnd);
     if (!bg_brush) bg_brush = CreateSolidBrush(RGB(243, 243, 243));
     if (!edit_bg_brush) edit_bg_brush = CreateSolidBrush(RGB(255, 255, 255));
-    if (!readonly_bg_brush) readonly_bg_brush = CreateSolidBrush(RGB(234, 234, 234));
+    if (!readonly_bg_brush) readonly_bg_brush = CreateSolidBrush(RGB(236, 236, 236));
+    if (!rec_bg_brush) rec_bg_brush = CreateSolidBrush(RGB(248, 250, 252));
     update_fonts();
   }
 
@@ -147,9 +163,13 @@ struct AppState {
     if (font) DeleteObject(font);
     if (bold_font) DeleteObject(bold_font);
     if (header_font) DeleteObject(header_font);
+    if (mono_font) DeleteObject(mono_font);
+    if (mono_bold_font) DeleteObject(mono_bold_font);
 
     int font_h = -MulDiv(9, static_cast<int>(dpi), 72);
     int hdr_h = -MulDiv(10, static_cast<int>(dpi), 72);
+    int mono_h = -MulDiv(9, static_cast<int>(dpi), 72);
+    int mono_bold_h = -MulDiv(11, static_cast<int>(dpi), 72);
 
     font = CreateFontW(font_h, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -160,15 +180,25 @@ struct AppState {
     header_font = CreateFontW(hdr_h, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    mono_font = CreateFontW(mono_h, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+    mono_bold_font = CreateFontW(mono_bold_h, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
   }
 
   void cleanup_resources() {
     if (bg_brush) { DeleteObject(bg_brush); bg_brush = nullptr; }
     if (edit_bg_brush) { DeleteObject(edit_bg_brush); edit_bg_brush = nullptr; }
     if (readonly_bg_brush) { DeleteObject(readonly_bg_brush); readonly_bg_brush = nullptr; }
+    if (rec_bg_brush) { DeleteObject(rec_bg_brush); rec_bg_brush = nullptr; }
     if (font) { DeleteObject(font); font = nullptr; }
     if (bold_font) { DeleteObject(bold_font); bold_font = nullptr; }
     if (header_font) { DeleteObject(header_font); header_font = nullptr; }
+    if (mono_font) { DeleteObject(mono_font); mono_font = nullptr; }
+    if (mono_bold_font) { DeleteObject(mono_bold_font); mono_bold_font = nullptr; }
   }
 };
 
@@ -231,7 +261,6 @@ void update_theme_titlebar(HWND hwnd) {
     RegCloseKey(hKey);
   }
   BOOL dark = (apps_use_light == 0);
-  // DWMWA_USE_IMMERSIVE_DARK_MODE (attribute 20 on Windows 10 build 18985+ / Windows 11, fallback 19)
   if (FAILED(DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)))) {
     DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
   }
@@ -257,7 +286,7 @@ void copy_to_clipboard(HWND hwnd, const std::wstring& text) {
 constexpr DWORD CHILD_STYLE = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS;
 
 HWND make_button(HWND parent, const wchar_t* text, int id, int x, int y, int w, int h, DWORD extra = 0) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
   HWND btn = CreateWindowExW(0, L"BUTTON", text,
                              CHILD_STYLE | BS_PUSHBUTTON | extra,
                              x, y, w, h, parent,
@@ -268,7 +297,7 @@ HWND make_button(HWND parent, const wchar_t* text, int id, int x, int y, int w, 
 }
 
 HWND make_static(HWND parent, const wchar_t* text, int x, int y, int w, int h, bool header = false) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
   HWND st = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                             x, y, w, h, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
   if (g) {
@@ -279,7 +308,7 @@ HWND make_static(HWND parent, const wchar_t* text, int x, int y, int w, int h, b
 }
 
 HWND make_edit(HWND parent, int id, int x, int y, int w, int h, DWORD extra_style, const wchar_t* cue = nullptr) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
   DWORD base = CHILD_STYLE | WS_BORDER | extra_style;
   if (!(extra_style & ES_MULTILINE)) base |= ES_AUTOHSCROLL;
   HWND edit = CreateWindowExW(0, L"EDIT", L"",
@@ -295,7 +324,7 @@ HWND make_edit(HWND parent, int id, int x, int y, int w, int h, DWORD extra_styl
 }
 
 HWND make_combo(HWND parent, int id, int x, int y, int w, int h, bool editable, const wchar_t* cue = nullptr) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
   HWND cb = CreateWindowExW(0, L"COMBOBOX", L"",
                             CHILD_STYLE | (editable ? CBS_DROPDOWN : CBS_DROPDOWNLIST) | WS_VSCROLL,
                             x, y, w, h, parent,
@@ -310,7 +339,7 @@ HWND make_combo(HWND parent, int id, int x, int y, int w, int h, bool editable, 
 }
 
 HWND make_radio(HWND parent, const wchar_t* text, int id, int x, int y, int w, int h, bool first) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
   HWND btn = CreateWindowExW(0, L"BUTTON", text,
                              CHILD_STYLE | BS_AUTORADIOBUTTON | (first ? WS_GROUP : 0),
                              x, y, w, h, parent,
@@ -321,6 +350,7 @@ HWND make_radio(HWND parent, const wchar_t* text, int id, int x, int y, int w, i
 }
 
 void layout(HWND hwnd);
+void layout_scroll_content(HWND scroll_hwnd);
 
 int next_free_id(AppState* g, int base) {
   int best = base;
@@ -339,7 +369,7 @@ int next_free_id(AppState* g, int base) {
 
 void add_example_row(HWND hwnd, bool negative) {
   auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-  if (!g) return;
+  if (!g || !g->scroll_container) return;
   auto& edits = negative ? g->neg_edits : g->pos_edits;
   auto& dels = negative ? g->neg_dels : g->pos_dels;
   int edit_id = next_free_id(g, negative ? IDC_NEG_EDIT_BASE : IDC_POS_EDIT_BASE);
@@ -347,17 +377,17 @@ void add_example_row(HWND hwnd, bool negative) {
 
   const wchar_t* cue = negative ? L"输入反例条码（必须被排除）..."
                                 : L"输入正例条码，如 PN8821@BN9012@DT2026...";
-  HWND edit = make_edit(hwnd, edit_id, g->scale_dpi(BASE_LEFT_MARGIN), 0, g->scale_dpi(320), g->scale_dpi(BASE_CTRL_H), 0, cue);
-  HWND del = make_button(hwnd, L"\u00d7", del_id, 0, 0, g->scale_dpi(BASE_DEL_W), g->scale_dpi(BASE_CTRL_H)); // ×
+  HWND edit = make_edit(g->scroll_container, edit_id, 0, 0, g->scale_dpi(320), g->scale_dpi(BASE_CTRL_H), 0, cue);
+  HWND del = make_button(g->scroll_container, L"\u00d7", del_id, 0, 0, g->scale_dpi(BASE_DEL_W), g->scale_dpi(BASE_CTRL_H)); // ×
   edits.push_back(edit);
   dels.push_back(del);
-  layout(hwnd);
+  layout_scroll_content(g->scroll_container);
   SetFocus(edit);
 }
 
 void remove_example_row(HWND hwnd, bool negative, HWND del_button) {
   auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-  if (!g) return;
+  if (!g || !g->scroll_container) return;
   auto& edits = negative ? g->neg_edits : g->pos_edits;
   auto& dels = negative ? g->neg_dels : g->pos_dels;
   auto it = std::find(dels.begin(), dels.end(), del_button);
@@ -367,7 +397,7 @@ void remove_example_row(HWND hwnd, bool negative, HWND del_button) {
   DestroyWindow(dels[index]);
   edits.erase(edits.begin() + static_cast<ptrdiff_t>(index));
   dels.erase(dels.begin() + static_cast<ptrdiff_t>(index));
-  layout(hwnd);
+  layout_scroll_content(g->scroll_container);
 }
 
 void clear_example_rows(AppState* g, bool negative) {
@@ -493,7 +523,7 @@ void run_batch_dialog(HWND owner, bool negative) {
       SetWindowTextW(g->pos_edits.back(), utf8_to_wide(line).c_str());
     }
   }
-  layout(owner);
+  layout_scroll_content(g->scroll_container);
 }
 
 std::string field_rule_text(const regex_tool::FieldRule& f) {
@@ -578,7 +608,6 @@ void set_mode(AppState* g, int which) {
   SendMessageW(g->mode_sep, BM_SETCHECK, which == 1 ? BST_CHECKED : BST_UNCHECKED, 0);
   SendMessageW(g->mode_len, BM_SETCHECK, which == 2 ? BST_CHECKED : BST_UNCHECKED, 0);
 
-  // Dynamic Folding (P2-5): Hide/Show Controls based on Mode
   ShowWindow(g->sep_label, which == 1 ? SW_SHOW : SW_HIDE);
   ShowWindow(g->sep_edit, which == 1 ? SW_SHOW : SW_HIDE);
   ShowWindow(g->count_label, which == 2 ? SW_SHOW : SW_HIDE);
@@ -615,7 +644,7 @@ std::vector<std::string> parse_separators(const AppState* g) {
 
 void rebuild_length_boxes(HWND hwnd) {
   auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-  if (!g) return;
+  if (!g || !g->scroll_container) return;
   std::vector<std::string> old;
   for (HWND h : g->length_boxes) old.push_back(wide_to_utf8(get_edit_text(h)));
   for (HWND h : g->length_boxes) DestroyWindow(h);
@@ -624,17 +653,17 @@ void rebuild_length_boxes(HWND hwnd) {
   if (cur < 0) cur = 0;
   bool show_len = is_mode_lengths(g);
   for (int i = 0; i <= cur; ++i) {
-    HWND h = make_edit(hwnd, IDC_LEN_BASE + i, g->scale_dpi(BASE_LEFT_MARGIN), 0, g->scale_dpi(56), g->scale_dpi(BASE_CTRL_H), 0, L"长度");
+    HWND h = make_edit(g->scroll_container, IDC_LEN_BASE + i, 0, 0, g->scale_dpi(56), g->scale_dpi(BASE_CTRL_H), 0, L"长度");
     if (i < static_cast<int>(old.size())) SetWindowTextW(h, utf8_to_wide(old[i]).c_str());
     ShowWindow(h, show_len ? SW_SHOW : SW_HIDE);
     g->length_boxes.push_back(h);
   }
-  layout(hwnd);
+  layout_scroll_content(g->scroll_container);
 }
 
 void rebuild_segment_table(HWND hwnd) {
   auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-  if (!g) return;
+  if (!g || !g->scroll_container) return;
 
   for (HWND h : g->seg_edits) DestroyWindow(h);
   for (HWND h : g->seg_promote_btns) DestroyWindow(h);
@@ -663,7 +692,7 @@ void rebuild_segment_table(HWND hwnd) {
       }
       if (!overridden) text += field_rule_text(seg.field);
     }
-    HWND edit = make_edit(hwnd, IDC_SEG_EDIT_BASE + static_cast<int>(i), g->scale_dpi(BASE_LEFT_MARGIN), 0, g->scale_dpi(320), g->scale_dpi(BASE_CTRL_H), extra);
+    HWND edit = make_edit(g->scroll_container, IDC_SEG_EDIT_BASE + static_cast<int>(i), 0, 0, g->scale_dpi(320), g->scale_dpi(BASE_CTRL_H), extra);
     SetWindowTextW(edit, utf8_to_wide(text).c_str());
 
     if (seg.is_literal) {
@@ -676,9 +705,9 @@ void rebuild_segment_table(HWND hwnd) {
             break;
           }
         }
-        HWND btn = make_button(hwnd, any_promoted ? L"还原" : L"提升",
+        HWND btn = make_button(g->scroll_container, any_promoted ? L"还原" : L"提升",
                                IDC_SEG_PROMOTE_BASE + static_cast<int>(i),
-                               g->scale_dpi(BASE_LEFT_MARGIN + 326), 0, g->scale_dpi(48), g->scale_dpi(BASE_CTRL_H));
+                               0, 0, g->scale_dpi(48), g->scale_dpi(BASE_CTRL_H));
         g->seg_promote_btns[i] = btn;
       }
     }
@@ -686,37 +715,54 @@ void rebuild_segment_table(HWND hwnd) {
   }
 }
 
-std::string render_candidate(const regex_tool::CandidateVerdict& vd, bool recommended) {
+std::string format_candidate_block(const regex_tool::CandidateVerdict& vd, size_t index, bool recommended) {
   const char* tag = vd.candidate.variant == "exact"    ? "精确"
                     : vd.candidate.variant == "relaxed" ? "长度放宽"
                                                         : "字符放宽";
   std::string out;
-  out += recommended ? "候选（推荐）[" : "候选 [";
-  out += tag;
-  out += "]:\n";
-  out += vd.candidate.regex + "\n";
-  if (!vd.passes_all) out += "  失败 " + std::to_string(vd.failures) + " 条\n";
-  out += "  正例:\n";
-  for (const auto& v : vd.positive_verdicts) {
-    out += v.passed ? "    ✓ " : "    ✗ ";
-    out += v.example;
-    if (!v.passed) {
-      out += v.failing_segment != SIZE_MAX
-                 ? "（卡在分段 " + std::to_string(v.failing_segment + 1) + "）"
-                 : "（整串不匹配）";
-    }
-    out += "\n";
+  if (recommended) {
+    out += "======================================================================\r\n";
+    out += "【推荐候选 [" + std::string(tag) + "]】\r\n";
+  } else {
+    out += "----------------------------------------------------------------------\r\n";
+    out += "【备选候选 " + std::to_string(index + 1) + " [" + std::string(tag) + "]】\r\n";
   }
-  out += "  反例:\n";
-  for (const auto& v : vd.negative_verdicts) {
-    out += v.passed ? "    ✓ [排除] " : "    ✗ [漏过] ";
-    out += v.example;
-    if (!v.passed && v.failing_segment != SIZE_MAX) {
-      out += "（卡在分段 " + std::to_string(v.failing_segment + 1) + "）";
-    }
-    out += "\n";
+  out += "正则表达式:\r\n  " + vd.candidate.regex + "\r\n\r\n";
+  if (vd.passes_all) {
+    out += "验证结论: 全部通过 ✓ (" + std::to_string(vd.positive_verdicts.size()) + " 条正例匹配，" +
+           std::to_string(vd.negative_verdicts.size()) + " 条反例排除)\r\n\r\n";
+  } else {
+    out += "验证结论: ⚠ 未完全通过 (" + std::to_string(vd.failures) + " 处不符合)\r\n\r\n";
   }
-  out += "\n";
+
+  if (!vd.positive_verdicts.empty()) {
+    out += "[正例匹配明细]\r\n";
+    for (const auto& v : vd.positive_verdicts) {
+      out += v.passed ? "  ✓ " : "  ✗ [失败] ";
+      out += v.example;
+      if (!v.passed) {
+        out += v.failing_segment != SIZE_MAX
+                   ? " (卡在分段 " + std::to_string(v.failing_segment + 1) + ")"
+                   : " (整串不匹配)";
+      }
+      out += "\r\n";
+    }
+    out += "\r\n";
+  }
+
+  if (!vd.negative_verdicts.empty()) {
+    out += "[反例排除明细]\r\n";
+    for (const auto& v : vd.negative_verdicts) {
+      out += v.passed ? "  ✓ [已排除] " : "  ✗ [⚠ 漏过] ";
+      out += v.example;
+      if (!v.passed && v.failing_segment != SIZE_MAX) {
+        out += " (卡在分段 " + std::to_string(v.failing_segment + 1) + ")";
+      }
+      out += "\r\n";
+    }
+    out += "\r\n";
+  }
+
   return out;
 }
 
@@ -740,30 +786,36 @@ void run_generate(HWND hwnd) {
 
     auto result = regex_tool::generate(p);
 
-    std::string text;
-    if (!result.warnings.empty()) {
-      text += "警告:\n";
-      for (const auto& w : result.warnings) text += "- " + w + "\n";
-      text += "\n";
-    }
     if (result.candidates.empty()) {
-      text += "（请在左侧至少输入一条正例条码，然后点击\"生成\"）";
       g->recommended_regex.clear();
+      SetWindowTextW(g->rec_regex_edit, L"");
+      SetWindowTextW(g->result_edit, L"（请在左侧至少输入一条正例条码，然后点击\"生成\"）");
       set_status(hwnd, L"提示: 请至少输入一条正例条码");
     } else {
-      if (!result.has_passing) {
-        text += "⚠ 没有任何候选通过全部正例/反例。以下候选未通过验证，仅按接近程度排序供定位问题：\n\n";
-      }
-      for (size_t i = 0; i < result.candidates.size(); ++i) {
-        text += render_candidate(result.candidates[i], i == 0 && result.has_passing);
-      }
       g->recommended_regex = result.candidates.front().candidate.regex;
+      SetWindowTextW(g->rec_regex_edit, utf8_to_wide(g->recommended_regex).c_str());
+
+      std::string text;
+      if (!result.warnings.empty()) {
+        text += "【警告提示】\r\n";
+        for (const auto& w : result.warnings) text += "- " + w + "\r\n";
+        text += "\r\n";
+      }
+
+      if (!result.has_passing) {
+        text += "⚠ 注意：没有任何候选通过全部正例/反例。以下候选未完全通过，仅按接近程度排序供定位问题：\r\n\r\n";
+      }
+
+      for (size_t i = 0; i < result.candidates.size(); ++i) {
+        text += format_candidate_block(result.candidates[i], i, i == 0 && result.has_passing);
+      }
+      SetWindowTextW(g->result_edit, utf8_to_wide(text).c_str());
+
       std::wstring st = L"生成完成: 产出 " + std::to_wstring(result.candidates.size()) + L" 条候选";
-      if (result.has_passing) st += L"（包含完全通过的推荐候选）";
+      if (result.has_passing) st += L"（推荐候选已就绪，可一键复制）";
       else st += L"（⚠ 未完全通过）";
       set_status(hwnd, st);
     }
-    SetWindowTextW(g->result_edit, utf8_to_wide(text).c_str());
 
     g->has_selftest_candidate = !result.candidates.empty();
     if (g->has_selftest_candidate) g->selftest_candidate = result.candidates.front().candidate;
@@ -772,10 +824,11 @@ void run_generate(HWND hwnd) {
                           ? std::vector<regex_tool::SegmentRule>{}
                           : result.candidates.front().candidate.segments;
     rebuild_segment_table(hwnd);
-    layout(hwnd);
+    layout_scroll_content(g->scroll_container);
   } catch (const std::exception& e) {
     std::string err_msg = "生成异常: ";
     err_msg += e.what();
+    SetWindowTextW(g->rec_regex_edit, L"");
     SetWindowTextW(g->result_edit, utf8_to_wide(err_msg).c_str());
     set_status(hwnd, L"生成失败: 规则表达式异常");
   }
@@ -785,12 +838,12 @@ void run_selftest(HWND hwnd) {
   auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   if (!g) return;
   if (!g->has_selftest_candidate) {
-    SetWindowTextW(g->selftest_label, L"自测: 请先生成候选");
+    SetWindowTextW(g->selftest_label, L"自测: 请先生成候选正则");
     return;
   }
   std::string input = wide_to_utf8(get_edit_text(g->selftest_edit));
   if (input.empty()) {
-    SetWindowTextW(g->selftest_label, L"自测: 请输入条码");
+    SetWindowTextW(g->selftest_label, L"自测: 请输入待判定条码");
     return;
   }
   auto v = regex_tool::verify_example(g->selftest_candidate, input);
@@ -1017,7 +1070,6 @@ bool load_project(HWND hwnd, const std::wstring& name, std::wstring& error) {
   return true;
 }
 
-// Total height of the scrollable content inside left column
 int content_height(const AppState* g) {
   int row_h = g->scale_dpi(BASE_ROW_H);
   int y = 0;
@@ -1041,6 +1093,92 @@ int content_height(const AppState* g) {
   return y + g->scale_dpi(20);
 }
 
+void layout_scroll_content(HWND scroll_hwnd) {
+  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
+  if (!g || !scroll_hwnd) return;
+
+  RECT rc;
+  GetClientRect(scroll_hwnd, &rc);
+  int view_w = rc.right;
+  int view_h = rc.bottom;
+
+  int total_content = content_height(g);
+  int max_scroll = std::max(total_content - view_h, 0);
+  if (g->scroll_pos > max_scroll) g->scroll_pos = max_scroll;
+
+  SCROLLINFO si{};
+  si.cbSize = sizeof(si);
+  si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+  si.nMin = 0;
+  si.nMax = total_content;
+  si.nPage = static_cast<UINT>(view_h);
+  si.nPos = g->scroll_pos;
+  SetScrollInfo(scroll_hwnd, SB_VERT, &si, TRUE);
+
+  int ctrl_h = g->scale_dpi(BASE_CTRL_H);
+  int row_h = g->scale_dpi(BASE_ROW_H);
+  int del_w = g->scale_dpi(BASE_DEL_W);
+  int edit_w = view_w - del_w - g->scale_dpi(10);
+
+  int y = 0 - g->scroll_pos;
+
+  MoveWindow(g->pos_label, 0, y, g->scale_dpi(180), g->scale_dpi(18), TRUE);
+  y += g->scale_dpi(22);
+  for (size_t i = 0; i < g->pos_edits.size(); ++i) {
+    MoveWindow(g->pos_edits[i], 0, y, edit_w, ctrl_h, TRUE);
+    MoveWindow(g->pos_dels[i], edit_w + g->scale_dpi(4), y, del_w, ctrl_h, TRUE);
+    y += row_h;
+  }
+  MoveWindow(g->add_pos, 0, y, g->scale_dpi(88), ctrl_h, TRUE);
+  MoveWindow(g->batch_pos, g->scale_dpi(94), y, g->scale_dpi(96), ctrl_h, TRUE);
+  y += row_h + g->scale_dpi(8);
+
+  MoveWindow(g->neg_label, 0, y, g->scale_dpi(180), g->scale_dpi(18), TRUE);
+  y += g->scale_dpi(22);
+  for (size_t i = 0; i < g->neg_edits.size(); ++i) {
+    MoveWindow(g->neg_edits[i], 0, y, edit_w, ctrl_h, TRUE);
+    MoveWindow(g->neg_dels[i], edit_w + g->scale_dpi(4), y, del_w, ctrl_h, TRUE);
+    y += row_h;
+  }
+  MoveWindow(g->add_neg, 0, y, g->scale_dpi(88), ctrl_h, TRUE);
+  MoveWindow(g->batch_neg, g->scale_dpi(94), y, g->scale_dpi(96), ctrl_h, TRUE);
+  y += row_h + g->scale_dpi(8);
+
+  MoveWindow(g->cfg_label, 0, y, g->scale_dpi(140), g->scale_dpi(18), TRUE);
+  y += g->scale_dpi(22);
+  int radio_w = g->scale_dpi(84);
+  MoveWindow(g->mode_auto, 0, y, radio_w, ctrl_h, TRUE);
+  MoveWindow(g->mode_sep, radio_w + g->scale_dpi(4), y, radio_w + g->scale_dpi(8), ctrl_h, TRUE);
+  MoveWindow(g->mode_len, (radio_w * 2) + g->scale_dpi(16), y, radio_w, ctrl_h, TRUE);
+  y += row_h;
+
+  if (is_mode_separators(g)) {
+    MoveWindow(g->sep_label, 0, y, g->scale_dpi(64), ctrl_h, TRUE);
+    MoveWindow(g->sep_edit, g->scale_dpi(68), y, g->scale_dpi(130), ctrl_h, TRUE);
+    y += row_h;
+  } else if (is_mode_lengths(g)) {
+    MoveWindow(g->count_label, 0, y, g->scale_dpi(46), ctrl_h, TRUE);
+    MoveWindow(g->seg_count_combo, g->scale_dpi(50), y, g->scale_dpi(66), ctrl_h, TRUE);
+    y += row_h;
+    int len_box_w = g->scale_dpi(54);
+    int len_gap = g->scale_dpi(6);
+    for (size_t i = 0; i < g->length_boxes.size(); ++i) {
+      MoveWindow(g->length_boxes[i],
+                 static_cast<int>(i % LEN_PER_LINE) * (len_box_w + len_gap),
+                 y + static_cast<int>(i / LEN_PER_LINE) * row_h, len_box_w, ctrl_h, TRUE);
+    }
+    y += static_cast<int>((g->length_boxes.size() + LEN_PER_LINE - 1) / LEN_PER_LINE) * row_h;
+  }
+
+  for (size_t i = 0; i < g->seg_edits.size(); ++i) {
+    MoveWindow(g->seg_edits[i], 0, y, edit_w - g->scale_dpi(54), ctrl_h, TRUE);
+    if (i < g->seg_promote_btns.size() && g->seg_promote_btns[i]) {
+      MoveWindow(g->seg_promote_btns[i], edit_w - g->scale_dpi(50), y, g->scale_dpi(48), ctrl_h, TRUE);
+    }
+    y += row_h;
+  }
+}
+
 void layout(HWND hwnd) {
   auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   if (!g) return;
@@ -1055,18 +1193,15 @@ void layout(HWND hwnd) {
 
   int left_margin = g->scale_dpi(BASE_LEFT_MARGIN);
   int ctrl_h = g->scale_dpi(BASE_CTRL_H);
-  int row_h = g->scale_dpi(BASE_ROW_H);
-  int del_w = g->scale_dpi(BASE_DEL_W);
 
   // Responsive column division (~44% left, ~56% right) (P2-7)
-  int left_pane_w = std::clamp(static_cast<int>(win_w * 0.44), g->scale_dpi(360), win_w - g->scale_dpi(360));
-  int right_x = left_pane_w + g->scale_dpi(16);
-  int right_pane_w = std::max(win_w - right_x - left_margin, g->scale_dpi(280));
-  int edit_w = left_pane_w - left_margin - del_w - g->scale_dpi(12);
+  int left_pane_w = std::clamp(static_cast<int>(win_w * 0.44), g->scale_dpi(380), win_w - g->scale_dpi(380));
+  int right_x = left_pane_w + g->scale_dpi(24);
+  int right_pane_w = std::max(win_w - right_x - left_margin, g->scale_dpi(300));
 
-  // 1. Project header bar (Pinned at top of left pane)
-  int y_top = g->scale_dpi(10);
-  int combo_w = std::max(left_pane_w - g->scale_dpi(200), g->scale_dpi(120));
+  // 1. Left Pane: Project header bar (Fixed at top)
+  int y_top = g->scale_dpi(12);
+  int combo_w = std::max(left_pane_w - g->scale_dpi(196), g->scale_dpi(130));
   MoveWindow(g->project_combo, left_margin, y_top, combo_w, ctrl_h, TRUE);
   int btn_w = g->scale_dpi(54);
   int btn_x = left_margin + combo_w + g->scale_dpi(6);
@@ -1076,102 +1211,140 @@ void layout(HWND hwnd) {
   btn_x += btn_w + g->scale_dpi(4);
   MoveWindow(g->load_btn, btn_x, y_top, btn_w, ctrl_h, TRUE);
 
-  // Pinned Bottom Section of Left Pane: "生成" Button (P0-6, P1-6)
-  int gen_btn_h = g->scale_dpi(36);
-  int left_bottom_y = win_h - status_h - gen_btn_h - g->scale_dpi(10);
-  MoveWindow(g->generate_btn, left_margin, left_bottom_y, left_pane_w - left_margin, gen_btn_h, TRUE);
+  // 2. Left Pane: Action Button (Fixed at bottom)
+  int gen_btn_h = g->scale_dpi(38);
+  int left_bottom_y = win_h - status_h - gen_btn_h - g->scale_dpi(12);
+  MoveWindow(g->generate_btn, left_margin, left_bottom_y, left_pane_w, gen_btn_h, TRUE);
 
-  // Middle Section of Left Pane: Scrollable Area
-  int scroll_view_top = y_top + row_h + g->scale_dpi(6);
-  int scroll_view_h = std::max(left_bottom_y - scroll_view_top - g->scale_dpi(8), 50);
+  // 3. Left Pane: Isolated Scroll Container Viewport (WS_CLIPCHILDREN)
+  int scroll_y = y_top + ctrl_h + g->scale_dpi(10);
+  int scroll_h = std::max(left_bottom_y - scroll_y - g->scale_dpi(10), 60);
+  MoveWindow(g->scroll_container, left_margin, scroll_y, left_pane_w, scroll_h, TRUE);
+  layout_scroll_content(g->scroll_container);
 
-  int total_content = content_height(g);
-  int max_scroll = std::max(total_content - scroll_view_h, 0);
-  if (g->scroll_pos > max_scroll) g->scroll_pos = max_scroll;
+  // 4. Right Pane: Structured Recommended Regex + Verification Details + Self-test
+  int r_top = g->scale_dpi(12);
 
-  SCROLLINFO si{};
-  si.cbSize = sizeof(si);
-  si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-  si.nMin = 0;
-  si.nMax = total_content;
-  si.nPage = static_cast<UINT>(scroll_view_h);
-  si.nPos = g->scroll_pos;
-  SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
-
-  int y = scroll_view_top - g->scroll_pos;
-
-  MoveWindow(g->pos_label, left_margin, y, g->scale_dpi(180), g->scale_dpi(18), TRUE);
-  y += g->scale_dpi(22);
-  for (size_t i = 0; i < g->pos_edits.size(); ++i) {
-    MoveWindow(g->pos_edits[i], left_margin, y, edit_w, ctrl_h, TRUE);
-    MoveWindow(g->pos_dels[i], left_margin + edit_w + g->scale_dpi(6), y, del_w, ctrl_h, TRUE);
-    y += row_h;
-  }
-  MoveWindow(g->add_pos, left_margin, y, g->scale_dpi(88), ctrl_h, TRUE);
-  MoveWindow(g->batch_pos, left_margin + g->scale_dpi(94), y, g->scale_dpi(96), ctrl_h, TRUE);
-  y += row_h + g->scale_dpi(8);
-
-  MoveWindow(g->neg_label, left_margin, y, g->scale_dpi(180), g->scale_dpi(18), TRUE);
-  y += g->scale_dpi(22);
-  for (size_t i = 0; i < g->neg_edits.size(); ++i) {
-    MoveWindow(g->neg_edits[i], left_margin, y, edit_w, ctrl_h, TRUE);
-    MoveWindow(g->neg_dels[i], left_margin + edit_w + g->scale_dpi(6), y, del_w, ctrl_h, TRUE);
-    y += row_h;
-  }
-  MoveWindow(g->add_neg, left_margin, y, g->scale_dpi(88), ctrl_h, TRUE);
-  MoveWindow(g->batch_neg, left_margin + g->scale_dpi(94), y, g->scale_dpi(96), ctrl_h, TRUE);
-  y += row_h + g->scale_dpi(8);
-
-  MoveWindow(g->cfg_label, left_margin, y, g->scale_dpi(140), g->scale_dpi(18), TRUE);
-  y += g->scale_dpi(22);
-  int radio_w = g->scale_dpi(84);
-  MoveWindow(g->mode_auto, left_margin, y, radio_w, ctrl_h, TRUE);
-  MoveWindow(g->mode_sep, left_margin + radio_w + g->scale_dpi(6), y, radio_w + g->scale_dpi(10), ctrl_h, TRUE);
-  MoveWindow(g->mode_len, left_margin + (radio_w * 2) + g->scale_dpi(20), y, radio_w, ctrl_h, TRUE);
-  y += row_h;
-
-  if (is_mode_separators(g)) {
-    MoveWindow(g->sep_label, left_margin, y, g->scale_dpi(68), ctrl_h, TRUE);
-    MoveWindow(g->sep_edit, left_margin + g->scale_dpi(72), y, g->scale_dpi(120), ctrl_h, TRUE);
-    y += row_h;
-  } else if (is_mode_lengths(g)) {
-    MoveWindow(g->count_label, left_margin, y, g->scale_dpi(48), ctrl_h, TRUE);
-    MoveWindow(g->seg_count_combo, left_margin + g->scale_dpi(52), y, g->scale_dpi(68), ctrl_h, TRUE);
-    y += row_h;
-    int len_box_w = g->scale_dpi(56);
-    int len_gap = g->scale_dpi(6);
-    for (size_t i = 0; i < g->length_boxes.size(); ++i) {
-      MoveWindow(g->length_boxes[i],
-                 left_margin + static_cast<int>(i % LEN_PER_LINE) * (len_box_w + len_gap),
-                 y + static_cast<int>(i / LEN_PER_LINE) * row_h, len_box_w, ctrl_h, TRUE);
-    }
-    y += static_cast<int>((g->length_boxes.size() + LEN_PER_LINE - 1) / LEN_PER_LINE) * row_h;
-  }
-
-  for (size_t i = 0; i < g->seg_edits.size(); ++i) {
-    MoveWindow(g->seg_edits[i], left_margin, y, edit_w, ctrl_h, TRUE);
-    if (i < g->seg_promote_btns.size() && g->seg_promote_btns[i]) {
-      MoveWindow(g->seg_promote_btns[i], left_margin + edit_w + g->scale_dpi(6), y, g->scale_dpi(48), ctrl_h, TRUE);
-    }
-    y += row_h;
-  }
-
-  // 2. Right Pane (Pinned Header, Result Edit, Self-test Area)
-  int r_top = g->scale_dpi(10);
-  int copy_btn_w = g->scale_dpi(110);
-  MoveWindow(g->result_header_label, right_x, r_top, right_pane_w - copy_btn_w - g->scale_dpi(10), g->scale_dpi(22), TRUE);
+  // 4.1 Recommended Regex Section Header & Copy Button
+  int copy_btn_w = g->scale_dpi(116);
+  MoveWindow(g->rec_header_label, right_x, r_top, right_pane_w - copy_btn_w - g->scale_dpi(10), g->scale_dpi(22), TRUE);
   MoveWindow(g->copy_btn, right_x + right_pane_w - copy_btn_w, r_top, copy_btn_w, ctrl_h, TRUE);
 
-  int selftest_area_h = g->scale_dpi(68);
-  int result_top = r_top + ctrl_h + g->scale_dpi(8);
-  int result_h = std::max(win_h - status_h - result_top - selftest_area_h - g->scale_dpi(12), g->scale_dpi(100));
-  MoveWindow(g->result_edit, right_x, result_top, right_pane_w, result_h, TRUE);
+  // 4.2 Recommended Regex Highlight Box
+  int rec_box_y = r_top + ctrl_h + g->scale_dpi(6);
+  int rec_box_h = g->scale_dpi(32);
+  MoveWindow(g->rec_regex_edit, right_x, rec_box_y, right_pane_w, rec_box_h, TRUE);
 
-  int selftest_y = result_top + result_h + g->scale_dpi(8);
-  MoveWindow(g->selftest_label, right_x, selftest_y, right_pane_w, g->scale_dpi(18), TRUE);
-  int test_btn_w = g->scale_dpi(72);
+  // 4.3 Verification Verdicts & Details Section Header
+  int detail_hdr_y = rec_box_y + rec_box_h + g->scale_dpi(12);
+  MoveWindow(g->result_header_label, right_x, detail_hdr_y, right_pane_w, g->scale_dpi(22), TRUE);
+
+  // 4.4 Verification Details Edit Box
+  int selftest_area_h = g->scale_dpi(72);
+  int detail_box_y = detail_hdr_y + g->scale_dpi(22);
+  int detail_box_h = std::max(win_h - status_h - detail_box_y - selftest_area_h - g->scale_dpi(14), g->scale_dpi(90));
+  MoveWindow(g->result_edit, right_x, detail_box_y, right_pane_w, detail_box_h, TRUE);
+
+  // 4.5 Self-test Section (Bottom of right pane)
+  int selftest_y = detail_box_y + detail_box_h + g->scale_dpi(10);
+  MoveWindow(g->selftest_title, right_x, selftest_y, right_pane_w, g->scale_dpi(18), TRUE);
+  int test_btn_w = g->scale_dpi(76);
   MoveWindow(g->selftest_edit, right_x, selftest_y + g->scale_dpi(22), right_pane_w - test_btn_w - g->scale_dpi(8), ctrl_h, TRUE);
   MoveWindow(g->selftest_btn, right_x + right_pane_w - test_btn_w, selftest_y + g->scale_dpi(22), test_btn_w, ctrl_h, TRUE);
+  MoveWindow(g->selftest_label, right_x, selftest_y + g->scale_dpi(48), right_pane_w, g->scale_dpi(18), TRUE);
+}
+
+// Window Procedure for the isolated scroll container viewport
+LRESULT CALLBACK scroll_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
+
+  switch (msg) {
+    case WM_VSCROLL: {
+      if (!g) return 0;
+      SCROLLINFO si{};
+      si.cbSize = sizeof(si);
+      si.fMask = SIF_ALL;
+      GetScrollInfo(hwnd, SB_VERT, &si);
+      int pos = si.nPos;
+      int step = g->scale_dpi(BASE_ROW_H);
+      switch (LOWORD(wParam)) {
+        case SB_LINEUP: pos -= step; break;
+        case SB_LINEDOWN: pos += step; break;
+        case SB_PAGEUP: pos -= static_cast<int>(si.nPage); break;
+        case SB_PAGEDOWN: pos += static_cast<int>(si.nPage); break;
+        case SB_THUMBTRACK:
+        case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+        default: return 0;
+      }
+      int max_pos = std::max(si.nMax - static_cast<int>(si.nPage), 0);
+      pos = std::clamp(pos, 0, max_pos);
+      if (pos != g->scroll_pos) {
+        g->scroll_pos = pos;
+        si.fMask = SIF_POS;
+        si.nPos = pos;
+        SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
+        layout_scroll_content(hwnd);
+      }
+      return 0;
+    }
+
+    case WM_MOUSEWHEEL: {
+      if (!g) return 0;
+      short delta = GET_WHEEL_DELTA_WPARAM(wParam);
+      int steps = delta / WHEEL_DELTA;
+      int scroll_amount = steps * g->scale_dpi(BASE_ROW_H) * 3;
+      int pos = g->scroll_pos - scroll_amount;
+      SCROLLINFO si{};
+      si.cbSize = sizeof(si);
+      si.fMask = SIF_ALL;
+      GetScrollInfo(hwnd, SB_VERT, &si);
+      int max_pos = std::max(si.nMax - static_cast<int>(si.nPage), 0);
+      pos = std::clamp(pos, 0, max_pos);
+      if (pos != g->scroll_pos) {
+        g->scroll_pos = pos;
+        si.fMask = SIF_POS;
+        si.nPos = pos;
+        SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
+        layout_scroll_content(hwnd);
+      }
+      return 0;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+      HDC hdc = reinterpret_cast<HDC>(wParam);
+      SetTextColor(hdc, RGB(32, 32, 32));
+      SetBkMode(hdc, TRANSPARENT);
+      return g && g->bg_brush ? reinterpret_cast<LRESULT>(g->bg_brush)
+                              : reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
+    }
+
+    case WM_CTLCOLOREDIT: {
+      HDC hdc = reinterpret_cast<HDC>(wParam);
+      HWND edit_h = reinterpret_cast<HWND>(lParam);
+      LONG style = GetWindowLongW(edit_h, GWL_STYLE);
+      if (style & ES_READONLY) {
+        SetTextColor(hdc, RGB(80, 80, 80));
+        SetBkColor(hdc, RGB(236, 236, 236));
+        return g && g->readonly_bg_brush ? reinterpret_cast<LRESULT>(g->readonly_bg_brush)
+                                         : reinterpret_cast<LRESULT>(GetStockObject(LTGRAY_BRUSH));
+      }
+      SetTextColor(hdc, RGB(32, 32, 32));
+      SetBkColor(hdc, RGB(255, 255, 255));
+      return g && g->edit_bg_brush ? reinterpret_cast<LRESULT>(g->edit_bg_brush)
+                                   : reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
+    }
+
+    case WM_CTLCOLORBTN: {
+      return g && g->bg_brush ? reinterpret_cast<LRESULT>(g->bg_brush)
+                              : reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
+    }
+
+    case WM_COMMAND: {
+      // Forward child commands to parent main window
+      return SendMessageW(g_main_hwnd, WM_COMMAND, wParam, lParam);
+    }
+  }
+  return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1195,54 +1368,70 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(g->status_bar, WM_SETFONT, reinterpret_cast<WPARAM>(g->font), TRUE);
       set_status(hwnd, L"就绪");
 
-      // Controls creation
+      // 1. Top Fixed Project Header
       g->project_combo = make_combo(hwnd, IDC_PROJECT_EDIT, 0, 0, 0, 0, true, L"项目名称");
       g->new_btn = make_button(hwnd, L"新建", IDC_NEW, 0, 0, 0, 0);
       g->save_btn = make_button(hwnd, L"保存", IDC_SAVE, 0, 0, 0, 0);
       g->load_btn = make_button(hwnd, L"加载", IDC_LOAD, 0, 0, 0, 0);
 
-      g->pos_label = make_static(hwnd, L"正例（必须匹配）", 0, 0, 0, 0, true);
-      g->add_pos = make_button(hwnd, L"+ 正例", IDC_ADD_POS, 0, 0, 0, 0);
-      g->batch_pos = make_button(hwnd, L"批量粘贴", IDC_BATCH_POS, 0, 0, 0, 0);
+      // 2. Bottom Fixed Generate Action Button
+      g->generate_btn = make_button(hwnd, L"生成候选正则", IDC_GENERATE, 0, 0, 0, 0, BS_OWNERDRAW);
 
-      g->neg_label = make_static(hwnd, L"反例（必须排除）", 0, 0, 0, 0, true);
-      g->add_neg = make_button(hwnd, L"+ 反例", IDC_ADD_NEG, 0, 0, 0, 0);
-      g->batch_neg = make_button(hwnd, L"批量粘贴", IDC_BATCH_NEG, 0, 0, 0, 0);
+      // 3. Isolated Scroll Viewport (Child Container with Hardware Clipping)
+      g->scroll_container = CreateWindowExW(0, L"RegexToolScrollArea", nullptr,
+                                            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VSCROLL,
+                                            0, 0, 0, 0, hwnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SCROLL_CONTAINER)),
+                                            GetModuleHandleW(nullptr), nullptr);
 
-      g->cfg_label = make_static(hwnd, L"分段配置", 0, 0, 0, 0, true);
-      g->mode_auto = make_radio(hwnd, L"自动分段", IDC_MODE_AUTO, 0, 0, 0, 0, true);
-      g->mode_sep = make_radio(hwnd, L"按分隔符", IDC_MODE_SEP, 0, 0, 0, 0, false);
-      g->mode_len = make_radio(hwnd, L"按长度", IDC_MODE_LEN, 0, 0, 0, 0, false);
+      // 4. Children inside the Scroll Viewport
+      HWND sc = g->scroll_container;
+      g->pos_label = make_static(sc, L"正例（必须匹配）", 0, 0, 0, 0, true);
+      g->add_pos = make_button(sc, L"+ 正例", IDC_ADD_POS, 0, 0, 0, 0);
+      g->batch_pos = make_button(sc, L"批量粘贴", IDC_BATCH_POS, 0, 0, 0, 0);
 
-      g->sep_label = make_static(hwnd, L"分隔符:", 0, 0, 0, 0);
-      g->sep_edit = make_edit(hwnd, IDC_SEP_EDIT, 0, 0, 0, 0, 0, L"如 @ 或 @,|");
-      g->count_label = make_static(hwnd, L"段数:", 0, 0, 0, 0);
-      g->seg_count_combo = make_combo(hwnd, IDC_SEG_COUNT_COMBO, 0, 0, 0, 0, false);
+      g->neg_label = make_static(sc, L"反例（必须排除）", 0, 0, 0, 0, true);
+      g->add_neg = make_button(sc, L"+ 反例", IDC_ADD_NEG, 0, 0, 0, 0);
+      g->batch_neg = make_button(sc, L"批量粘贴", IDC_BATCH_NEG, 0, 0, 0, 0);
+
+      g->cfg_label = make_static(sc, L"分段配置", 0, 0, 0, 0, true);
+      g->mode_auto = make_radio(sc, L"自动分段", IDC_MODE_AUTO, 0, 0, 0, 0, true);
+      g->mode_sep = make_radio(sc, L"按分隔符", IDC_MODE_SEP, 0, 0, 0, 0, false);
+      g->mode_len = make_radio(sc, L"按长度", IDC_MODE_LEN, 0, 0, 0, 0, false);
+
+      g->sep_label = make_static(sc, L"分隔符:", 0, 0, 0, 0);
+      g->sep_edit = make_edit(sc, IDC_SEP_EDIT, 0, 0, 0, 0, 0, L"如 @ 或 @,|");
+      g->count_label = make_static(sc, L"段数:", 0, 0, 0, 0);
+      g->seg_count_combo = make_combo(sc, IDC_SEG_COUNT_COMBO, 0, 0, 0, 0, false);
       for (int i = 1; i <= 10; ++i) {
         std::wstring t = std::to_wstring(i);
         SendMessageW(g->seg_count_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(t.c_str()));
       }
-      SendMessageW(g->seg_count_combo, CB_SETCURSEL, 1, 0);  // 2 segments by default
+      SendMessageW(g->seg_count_combo, CB_SETCURSEL, 1, 0);
 
       set_mode(g, 0);
 
-      // Primary Accent Action Button ("生成")
-      g->generate_btn = make_button(hwnd, L"生成候选正则", IDC_GENERATE, 0, 0, 0, 0, BS_OWNERDRAW);
-
-      // Right Pane Controls
-      g->result_header_label = make_static(hwnd, L"候选正则结果", 0, 0, 0, 0, true);
+      // 5. Right Pane Controls (Dedicated Recommended Regex Box + Details Box + Self-test)
+      g->rec_header_label = make_static(hwnd, L"推荐候选正则:", 0, 0, 0, 0, true);
       g->copy_btn = make_button(hwnd, L"复制推荐正则", IDC_COPY_REGEX, 0, 0, 0, 0);
+      g->rec_regex_edit = make_edit(hwnd, IDC_REC_REGEX_EDIT, 0, 0, 0, 0, ES_READONLY, L"（生成后此处将显示高亮推荐正则）");
+      SendMessageW(g->rec_regex_edit, WM_SETFONT, reinterpret_cast<WPARAM>(g->mono_bold_font), TRUE);
+
+      g->result_header_label = make_static(hwnd, L"验证详情与备选候选:", 0, 0, 0, 0, true);
       g->result_edit = make_edit(hwnd, IDC_RESULT_EDIT, 0, 0, 0, 0,
                                  ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL);
-      SetWindowTextW(g->result_edit, L"请在左侧输入正例条码（每行一条），然后点击\"生成\"。\r\n提示：可使用\"批量粘贴\"一次输入多条。");
+      SendMessageW(g->result_edit, WM_SETFONT, reinterpret_cast<WPARAM>(g->mono_font), TRUE);
+      SetWindowTextW(g->result_edit, L"请在左侧输入正例条码（每行一条），然后点击\"生成候选正则\"。\r\n提示：可使用\"批量粘贴\"一次输入多条。");
 
-      g->selftest_label = make_static(hwnd, L"自测结果:", 0, 0, 0, 0, true);
+      g->selftest_title = make_static(hwnd, L"自测条码验证:", 0, 0, 0, 0, true);
       g->selftest_edit = make_edit(hwnd, IDC_SELFTEST_EDIT, 0, 0, 0, 0, 0, L"输入待判定条码进行自测...");
+      SendMessageW(g->selftest_edit, WM_SETFONT, reinterpret_cast<WPARAM>(g->mono_font), TRUE);
       g->selftest_btn = make_button(hwnd, L"判定", IDC_SELFTEST_BTN, 0, 0, 0, 0);
+      g->selftest_label = make_static(hwnd, L"自测结果: 待输入", 0, 0, 0, 0);
 
       populate_projects(g);
       rebuild_length_boxes(hwnd);
-      add_example_row(hwnd, false);  // 1 initial positive row
+      add_example_row(hwnd, false);
       return 0;
     }
 
@@ -1254,6 +1443,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_THEMECHANGED:
       update_theme_titlebar(hwnd);
       InvalidateRect(hwnd, nullptr, TRUE);
+      if (g && g->scroll_container) InvalidateRect(g->scroll_container, nullptr, TRUE);
       return 0;
 
     case WM_DPICHANGED: {
@@ -1264,14 +1454,30 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Broadcast font update to all children
         HWND child = FindWindowExW(hwnd, nullptr, nullptr, nullptr);
         while (child) {
-          SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g->font), TRUE);
+          if (child == g->rec_regex_edit) {
+            SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g->mono_bold_font), TRUE);
+          } else if (child == g->result_edit || child == g->selftest_edit) {
+            SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g->mono_font), TRUE);
+          } else {
+            SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g->font), TRUE);
+          }
           child = FindWindowExW(hwnd, child, nullptr, nullptr);
         }
+
+        if (g->rec_header_label) SendMessageW(g->rec_header_label, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
         if (g->result_header_label) SendMessageW(g->result_header_label, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
-        if (g->pos_label) SendMessageW(g->pos_label, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
-        if (g->neg_label) SendMessageW(g->neg_label, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
-        if (g->cfg_label) SendMessageW(g->cfg_label, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
-        if (g->selftest_label) SendMessageW(g->selftest_label, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
+        if (g->selftest_title) SendMessageW(g->selftest_title, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
+
+        if (g->scroll_container) {
+          HWND sc_child = FindWindowExW(g->scroll_container, nullptr, nullptr, nullptr);
+          while (sc_child) {
+            SendMessageW(sc_child, WM_SETFONT, reinterpret_cast<WPARAM>(g->font), TRUE);
+            sc_child = FindWindowExW(g->scroll_container, sc_child, nullptr, nullptr);
+          }
+          if (g->pos_label) SendMessageW(g->pos_label, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
+          if (g->neg_label) SendMessageW(g->neg_label, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
+          if (g->cfg_label) SendMessageW(g->cfg_label, WM_SETFONT, reinterpret_cast<WPARAM>(g->header_font), TRUE);
+        }
 
         auto prc = reinterpret_cast<RECT*>(lParam);
         if (prc) {
@@ -1287,8 +1493,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_GETMINMAXINFO: {
       auto mmi = reinterpret_cast<MINMAXINFO*>(lParam);
       int dpi = g ? g->dpi : 96;
-      mmi->ptMinTrackSize.x = MulDiv(800, static_cast<int>(dpi), 96);
-      mmi->ptMinTrackSize.y = MulDiv(480, static_cast<int>(dpi), 96);
+      mmi->ptMinTrackSize.x = MulDiv(880, static_cast<int>(dpi), 96);
+      mmi->ptMinTrackSize.y = MulDiv(520, static_cast<int>(dpi), 96);
       return 0;
     }
 
@@ -1302,6 +1508,19 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_CTLCOLOREDIT: {
       HDC hdc = reinterpret_cast<HDC>(wParam);
+      HWND edit_h = reinterpret_cast<HWND>(lParam);
+      if (g && edit_h == g->rec_regex_edit) {
+        SetTextColor(hdc, RGB(0, 79, 148)); // Deep Accent Blue
+        SetBkColor(hdc, RGB(248, 250, 252));
+        return reinterpret_cast<LRESULT>(g->rec_bg_brush);
+      }
+      LONG style = GetWindowLongW(edit_h, GWL_STYLE);
+      if (style & ES_READONLY) {
+        SetTextColor(hdc, RGB(40, 40, 40));
+        SetBkColor(hdc, RGB(255, 255, 255));
+        return g && g->edit_bg_brush ? reinterpret_cast<LRESULT>(g->edit_bg_brush)
+                                     : reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
+      }
       SetTextColor(hdc, RGB(32, 32, 32));
       SetBkColor(hdc, RGB(255, 255, 255));
       return g && g->edit_bg_brush ? reinterpret_cast<LRESULT>(g->edit_bg_brush)
@@ -1351,57 +1570,6 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       break;
     }
 
-    case WM_VSCROLL: {
-      if (!g) return 0;
-      SCROLLINFO si{};
-      si.cbSize = sizeof(si);
-      si.fMask = SIF_ALL;
-      GetScrollInfo(hwnd, SB_VERT, &si);
-      int pos = si.nPos;
-      int step = g->scale_dpi(BASE_ROW_H);
-      switch (LOWORD(wParam)) {
-        case SB_LINEUP: pos -= step; break;
-        case SB_LINEDOWN: pos += step; break;
-        case SB_PAGEUP: pos -= static_cast<int>(si.nPage); break;
-        case SB_PAGEDOWN: pos += static_cast<int>(si.nPage); break;
-        case SB_THUMBTRACK:
-        case SB_THUMBPOSITION: pos = si.nTrackPos; break;
-        default: return 0;
-      }
-      int max_pos = std::max(si.nMax - static_cast<int>(si.nPage), 0);
-      pos = std::clamp(pos, 0, max_pos);
-      if (pos != g->scroll_pos) {
-        g->scroll_pos = pos;
-        si.fMask = SIF_POS;
-        si.nPos = pos;
-        SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
-        layout(hwnd);
-      }
-      return 0;
-    }
-
-    case WM_MOUSEWHEEL: {
-      if (!g) return 0;
-      short delta = GET_WHEEL_DELTA_WPARAM(wParam);
-      int steps = delta / WHEEL_DELTA;
-      int scroll_amount = steps * g->scale_dpi(BASE_ROW_H) * 3;
-      int pos = g->scroll_pos - scroll_amount;
-      SCROLLINFO si{};
-      si.cbSize = sizeof(si);
-      si.fMask = SIF_ALL;
-      GetScrollInfo(hwnd, SB_VERT, &si);
-      int max_pos = std::max(si.nMax - static_cast<int>(si.nPage), 0);
-      pos = std::clamp(pos, 0, max_pos);
-      if (pos != g->scroll_pos) {
-        g->scroll_pos = pos;
-        si.fMask = SIF_POS;
-        si.nPos = pos;
-        SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
-        layout(hwnd);
-      }
-      return 0;
-    }
-
     case WM_COMMAND: {
       int id = LOWORD(wParam);
       int code = HIWORD(wParam);
@@ -1412,7 +1580,6 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
       }
 
-      // CBN_SELCHANGE Fix (P0-2)
       if (id == IDC_PROJECT_EDIT && code == CBN_SELCHANGE) {
         int sel = static_cast<int>(SendMessageW(g->project_combo, CB_GETCURSEL, 0, 0));
         if (sel != CB_ERR) {
@@ -1444,8 +1611,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g->recommended_regex.clear();
         SetWindowTextW(g->project_combo, L"");
         SetWindowTextW(g->sep_edit, L"");
-        SetWindowTextW(g->result_edit, L"请在左侧输入正例条码（每行一条），然后点击\"生成\"。\r\n提示：可使用\"批量粘贴\"一次输入多条。");
-        SetWindowTextW(g->selftest_label, L"自测结果:");
+        SetWindowTextW(g->rec_regex_edit, L"");
+        SetWindowTextW(g->result_edit, L"请在左侧输入正例条码（每行一条），然后点击\"生成候选正则\"。\r\n提示：可使用\"批量粘贴\"一次输入多条。");
+        SetWindowTextW(g->selftest_label, L"自测结果: 待输入");
         SetWindowTextW(g->selftest_edit, L"");
         set_mode(g, 0);
         SendMessageW(g->seg_count_combo, CB_SETCURSEL, 1, 0);
@@ -1454,7 +1622,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         clear_example_rows(g, true);
         destroy_segment_table(g);
         add_example_row(hwnd, false);
-        layout(hwnd);
+        layout_scroll_content(g->scroll_container);
         set_status(hwnd, L"已新建空白项目");
         return 0;
       }
@@ -1475,16 +1643,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (id == IDC_ADD_NEG) { add_example_row(hwnd, true); return 0; }
       if (id == IDC_BATCH_POS) { run_batch_dialog(hwnd, false); return 0; }
       if (id == IDC_BATCH_NEG) { run_batch_dialog(hwnd, true); return 0; }
-      if (id == IDC_MODE_AUTO) { set_mode(g, 0); layout(hwnd); return 0; }
-      if (id == IDC_MODE_SEP) { set_mode(g, 1); layout(hwnd); return 0; }
-      if (id == IDC_MODE_LEN) { set_mode(g, 2); layout(hwnd); return 0; }
+      if (id == IDC_MODE_AUTO) { set_mode(g, 0); layout_scroll_content(g->scroll_container); return 0; }
+      if (id == IDC_MODE_SEP) { set_mode(g, 1); layout_scroll_content(g->scroll_container); return 0; }
+      if (id == IDC_MODE_LEN) { set_mode(g, 2); layout_scroll_content(g->scroll_container); return 0; }
       if (id == IDC_GENERATE) { run_generate(hwnd); return 0; }
       if (id == IDC_COPY_REGEX) {
         if (!g->recommended_regex.empty()) {
           copy_to_clipboard(hwnd, utf8_to_wide(g->recommended_regex));
-          set_status(hwnd, L"已复制推荐正则到剪贴板: " + utf8_to_wide(g->recommended_regex));
+          set_status(hwnd, L"已复制推荐正则: " + utf8_to_wide(g->recommended_regex));
         } else {
-          set_status(hwnd, L"暂无候选正则可供复制，请先生成");
+          set_status(hwnd, L"暂无推荐正则可供复制，请先生成");
         }
         return 0;
       }
@@ -1550,13 +1718,27 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
   icex.dwICC = ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
   InitCommonControlsEx(&icex);
 
+  HICON hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+  HICON hIconSm = reinterpret_cast<HICON>(LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+                                                      GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+
   WNDCLASSW wc{};
   wc.hbrBackground = CreateSolidBrush(RGB(243, 243, 243));
   wc.lpfnWndProc = wnd_proc;
   wc.hInstance = hInstance;
+  wc.hIcon = hIcon;
   wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
   wc.lpszClassName = L"RegexToolMain";
   RegisterClassW(&wc);
+
+  // Register Scroll Area Viewport Child Window Class
+  WNDCLASSW sc{};
+  sc.hbrBackground = CreateSolidBrush(RGB(243, 243, 243));
+  sc.lpfnWndProc = scroll_proc;
+  sc.hInstance = hInstance;
+  sc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+  sc.lpszClassName = L"RegexToolScrollArea";
+  RegisterClassW(&sc);
 
   WNDCLASSW bc{};
   bc.hbrBackground = CreateSolidBrush(RGB(243, 243, 243));
@@ -1576,9 +1758,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
   HACCEL hAccel = CreateAcceleratorTableW(accels, sizeof(accels) / sizeof(accels[0]));
 
   g_main_hwnd = CreateWindowExW(WS_EX_COMPOSITED, L"RegexToolMain", L"条码正则生成器",
-                                WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 980, 680,
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1020, 720,
                                 nullptr, nullptr, hInstance, nullptr);
+  if (hIcon) SendMessageW(g_main_hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hIcon));
+  if (hIconSm) SendMessageW(g_main_hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIconSm));
+
   ShowWindow(g_main_hwnd, nCmdShow);
   UpdateWindow(g_main_hwnd);
 

@@ -14,7 +14,7 @@ endif()
 add_library(engine STATIC src/engine/engine.cpp)
 target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-add_executable(regex_tool WIN32 src/app/main.cpp src/app/app.manifest)
+add_executable(regex_tool WIN32 src/app/main.cpp src/app/app.manifest src/app/app.rc)
 target_link_libraries(regex_tool PRIVATE engine comctl32 dwmapi uxtheme)
 
 add_executable(engine_tests tests/engine_tests.cpp)
