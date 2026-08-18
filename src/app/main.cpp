@@ -47,10 +47,11 @@ constexpr int IDC_SEG_COUNT_COMBO = 1013;
 constexpr int IDC_GENERATE = 1014;
 constexpr int IDC_REC_REGEX_EDIT = 1015;
 constexpr int IDC_COPY_REGEX = 1016;
-constexpr int IDC_RESULT_EDIT = 1017;
-constexpr int IDC_SELFTEST_EDIT = 1018;
-constexpr int IDC_SELFTEST_BTN = 1019;
-constexpr int IDC_STATUSBAR = 1020;
+constexpr int IDC_COPY_CAP_REGEX = 1017;
+constexpr int IDC_RESULT_EDIT = 1018;
+constexpr int IDC_SELFTEST_EDIT = 1019;
+constexpr int IDC_SELFTEST_BTN = 1020;
+constexpr int IDC_STATUSBAR = 1021;
 
 // Dynamic rows ID intervals
 constexpr int IDC_POS_EDIT_BASE = 2000;      // 2000 .. 2499
@@ -124,6 +125,7 @@ struct AppState {
   // Controls - Right Pane
   HWND rec_header_label = nullptr;
   HWND copy_btn = nullptr;
+  HWND copy_cap_btn = nullptr;
   HWND rec_regex_edit = nullptr;
   HWND result_header_label = nullptr;
   HWND result_edit = nullptr;
@@ -144,6 +146,7 @@ struct AppState {
   regex_tool::Candidate selftest_candidate;
   bool has_selftest_candidate = false;
   std::string recommended_regex;
+  std::string recommended_capturing_regex;
 
   int scale_dpi(int val) const {
     return MulDiv(val, static_cast<int>(dpi), 96);
@@ -729,18 +732,21 @@ void rebuild_segment_table(HWND hwnd) {
 }
 
 std::string format_candidate_block(const regex_tool::CandidateVerdict& vd, size_t index, bool recommended) {
-  const char* tag = vd.candidate.variant == "exact"    ? "精确"
-                    : vd.candidate.variant == "relaxed" ? "长度放宽"
-                                                        : "字符放宽";
+  std::string tag = vd.candidate.display_name.empty() ? vd.candidate.variant : vd.candidate.display_name;
   std::string out;
   if (recommended) {
     out += "======================================================================\r\n";
-    out += "【推荐候选 [" + std::string(tag) + "]】\r\n";
+    out += "【推荐候选】 " + tag + "\r\n";
   } else {
     out += "----------------------------------------------------------------------\r\n";
-    out += "【备选候选 " + std::to_string(index + 1) + " [" + std::string(tag) + "]】\r\n";
+    out += "【候选 " + std::to_string(index + 1) + "】 " + tag + "\r\n";
   }
-  out += "正则表达式:\r\n  " + vd.candidate.regex + "\r\n\r\n";
+  out += "匹配正则:\r\n  " + vd.candidate.regex + "\r\n";
+  if (!vd.candidate.capturing_regex.empty()) {
+    out += "捕获正则:\r\n  " + vd.candidate.capturing_regex + "\r\n";
+  }
+  out += "\r\n";
+
   if (vd.passes_all) {
     out += "验证结论: 全部通过 ✓ (" + std::to_string(vd.positive_verdicts.size()) + " 条正例匹配，" +
            std::to_string(vd.negative_verdicts.size()) + " 条反例排除)\r\n\r\n";
@@ -801,11 +807,13 @@ void run_generate(HWND hwnd) {
 
     if (result.candidates.empty()) {
       g->recommended_regex.clear();
+      g->recommended_capturing_regex.clear();
       SetWindowTextW(g->rec_regex_edit, L"");
       SetWindowTextW(g->result_edit, L"（请在左侧至少输入一条正例条码，然后点击\"生成\"）");
       set_status(hwnd, L"提示: 请至少输入一条正例条码");
     } else {
       g->recommended_regex = result.candidates.front().candidate.regex;
+      g->recommended_capturing_regex = result.candidates.front().candidate.capturing_regex;
       SetWindowTextW(g->rec_regex_edit, utf8_to_wide(g->recommended_regex).c_str());
 
       std::string text;
@@ -825,7 +833,7 @@ void run_generate(HWND hwnd) {
       SetWindowTextW(g->result_edit, utf8_to_wide(text).c_str());
 
       std::wstring st = L"生成完成: 产出 " + std::to_wstring(result.candidates.size()) + L" 条候选";
-      if (result.has_passing) st += L"（推荐候选已就绪，可一键复制）";
+      if (result.has_passing) st += L"（智能业务推荐候选已就绪，可一键复制）";
       else st += L"（⚠ 未完全通过）";
       set_status(hwnd, st);
     }
@@ -1268,10 +1276,13 @@ void layout(HWND hwnd) {
   // 4. Right Pane: Structured Recommended Regex + Verification Details + Self-test
   int r_top = g->scale_dpi(12);
 
-  // 4.1 Recommended Regex Section Header & Copy Button
-  int copy_btn_w = g->scale_dpi(116);
-  MoveWindow(g->rec_header_label, right_x, r_top, right_pane_w - copy_btn_w - g->scale_dpi(10), g->scale_dpi(22), TRUE);
-  MoveWindow(g->copy_btn, right_x + right_pane_w - copy_btn_w, r_top, copy_btn_w, ctrl_h, TRUE);
+  // 4.1 Recommended Regex Section Header & Copy Buttons
+  int btn_w1 = g->scale_dpi(104);
+  int btn_w2 = g->scale_dpi(104);
+  int total_btn_w = btn_w1 + btn_w2 + g->scale_dpi(6);
+  MoveWindow(g->rec_header_label, right_x, r_top, std::max(right_pane_w - total_btn_w - g->scale_dpi(10), g->scale_dpi(100)), g->scale_dpi(22), TRUE);
+  MoveWindow(g->copy_btn, right_x + right_pane_w - total_btn_w, r_top, btn_w1, ctrl_h, TRUE);
+  MoveWindow(g->copy_cap_btn, right_x + right_pane_w - btn_w2, r_top, btn_w2, ctrl_h, TRUE);
 
   // 4.2 Recommended Regex Highlight Box
   int rec_box_y = r_top + ctrl_h + g->scale_dpi(6);
@@ -1457,6 +1468,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       // 5. Right Pane Controls (Dedicated Recommended Regex Box + Details Box + Self-test)
       g->rec_header_label = make_static(hwnd, L"推荐候选正则:", 0, 0, 0, 0, true);
       g->copy_btn = make_button(hwnd, L"复制推荐正则", IDC_COPY_REGEX, 0, 0, 0, 0);
+      g->copy_cap_btn = make_button(hwnd, L"复制捕获正则", IDC_COPY_CAP_REGEX, 0, 0, 0, 0);
       g->rec_regex_edit = make_edit(hwnd, IDC_REC_REGEX_EDIT, 0, 0, 0, 0, ES_READONLY, L"（生成后此处将显示高亮推荐正则）");
       SendMessageW(g->rec_regex_edit, WM_SETFONT, reinterpret_cast<WPARAM>(g->mono_bold_font), TRUE);
 
@@ -1699,6 +1711,15 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           set_status(hwnd, L"已复制推荐正则: " + utf8_to_wide(g->recommended_regex));
         } else {
           set_status(hwnd, L"暂无推荐正则可供复制，请先生成");
+        }
+        return 0;
+      }
+      if (id == IDC_COPY_CAP_REGEX) {
+        if (!g->recommended_capturing_regex.empty()) {
+          copy_to_clipboard(hwnd, utf8_to_wide(g->recommended_capturing_regex));
+          set_status(hwnd, L"已复制提取捕获正则: " + utf8_to_wide(g->recommended_capturing_regex));
+        } else {
+          set_status(hwnd, L"暂无提取捕获正则可供复制，请先生成");
         }
         return 0;
       }

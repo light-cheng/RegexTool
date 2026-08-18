@@ -30,11 +30,13 @@ struct SegmentRule {
 // One candidate regex plus the segment model it was composed from.
 struct Candidate {
   std::string regex;                 // anchored, e.g. "^PN\\d{4}@BN\\d{4}@...$"
+  std::string capturing_regex;       // anchored capturing regex, e.g. "^(PN\\d{4})@...$"
   std::vector<SegmentRule> segments; // in order, concatenation equals the regex
-  std::string variant;               // "exact" | "relaxed" | "broadened" (工单 06)
+  std::string variant;               // "smart" | "relaxed" | "broadened" | "exact"
+  std::string display_name;          // Human-readable title
 };
 
-// Segmentation configuration (工单 05). Defaults = fully automatic.
+// Segmentation configuration. Defaults = fully automatic.
 struct SegmentConfig {
   bool use_lengths = false;                 // manual length-based segmentation
   std::vector<std::size_t> lengths;         // chunk sizes when use_lengths
@@ -75,26 +77,30 @@ struct CandidateVerdict {
 
 struct GenerationResult {
   std::vector<CandidateVerdict> candidates;  // passing first (recommended first); when
-                                             // none pass, the closest failing ones (工单 09)
-  std::vector<std::string> warnings;         // input-hygiene warnings (工单 04)
+                                             // none pass, the closest failing ones
+  std::vector<std::string> warnings;         // input-hygiene warnings
   bool has_passing = false;                  // whether any candidate passes all examples
 };
 
 // Generate candidates from the project and validate each against every example.
-// Leading/trailing whitespace of each example is trimmed; hygiene problems are
-// reported as warnings, never silently folded into the rules (工单 04).
 GenerationResult generate(const Project& project);
 
 // Convenience overload: positives only.
 GenerationResult generate(const std::vector<std::string>& positives);
 
-// Self-test (工单 07): judge one arbitrary barcode against a candidate using the
+// Self-test: judge one arbitrary barcode against a candidate using the
 // same verification logic as the project examples.
 ExampleVerdict verify_example(const Candidate& candidate, const std::string& example);
 
-// Tags inside a literal that can be promoted to fields (工单 05): letter runs
+// Tags inside a literal that can be promoted to fields: letter runs
 // immediately followed by digits, e.g. "@DT2026@LT" -> {"DT"}.
 std::vector<std::string> promotable_tags(const std::string& literal);
+
+// Compose anchored non-capturing regex.
+std::string compose_regex(const std::vector<SegmentRule>& segments);
+
+// Compose anchored capturing regex.
+std::string compose_capturing_regex(const std::vector<SegmentRule>& segments);
 
 // Utility: trim leading and trailing whitespace (\r, \n, \t, space).
 std::string trim(const std::string& s);
