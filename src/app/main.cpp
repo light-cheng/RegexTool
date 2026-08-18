@@ -266,6 +266,13 @@ void update_theme_titlebar(HWND hwnd) {
   }
 }
 
+AppState* get_app_state(HWND hwnd) {
+  if (!hwnd) return nullptr;
+  HWND root = GetAncestor(hwnd, GA_ROOT);
+  if (!root) root = hwnd;
+  return reinterpret_cast<AppState*>(GetWindowLongPtrW(root, GWLP_USERDATA));
+}
+
 void copy_to_clipboard(HWND hwnd, const std::wstring& text) {
   if (text.empty()) return;
   if (!OpenClipboard(hwnd)) return;
@@ -286,7 +293,7 @@ void copy_to_clipboard(HWND hwnd, const std::wstring& text) {
 constexpr DWORD CHILD_STYLE = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS;
 
 HWND make_button(HWND parent, const wchar_t* text, int id, int x, int y, int w, int h, DWORD extra = 0) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
+  auto g = get_app_state(parent);
   HWND btn = CreateWindowExW(0, L"BUTTON", text,
                              CHILD_STYLE | BS_PUSHBUTTON | extra,
                              x, y, w, h, parent,
@@ -297,7 +304,7 @@ HWND make_button(HWND parent, const wchar_t* text, int id, int x, int y, int w, 
 }
 
 HWND make_static(HWND parent, const wchar_t* text, int x, int y, int w, int h, bool header = false) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
+  auto g = get_app_state(parent);
   HWND st = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                             x, y, w, h, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
   if (g) {
@@ -308,7 +315,7 @@ HWND make_static(HWND parent, const wchar_t* text, int x, int y, int w, int h, b
 }
 
 HWND make_edit(HWND parent, int id, int x, int y, int w, int h, DWORD extra_style, const wchar_t* cue = nullptr) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
+  auto g = get_app_state(parent);
   DWORD base = CHILD_STYLE | WS_BORDER | extra_style;
   if (!(extra_style & ES_MULTILINE)) base |= ES_AUTOHSCROLL;
   HWND edit = CreateWindowExW(0, L"EDIT", L"",
@@ -324,7 +331,7 @@ HWND make_edit(HWND parent, int id, int x, int y, int w, int h, DWORD extra_styl
 }
 
 HWND make_combo(HWND parent, int id, int x, int y, int w, int h, bool editable, const wchar_t* cue = nullptr) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
+  auto g = get_app_state(parent);
   HWND cb = CreateWindowExW(0, L"COMBOBOX", L"",
                             CHILD_STYLE | (editable ? CBS_DROPDOWN : CBS_DROPDOWNLIST) | WS_VSCROLL,
                             x, y, w, h, parent,
@@ -339,7 +346,7 @@ HWND make_combo(HWND parent, int id, int x, int y, int w, int h, bool editable, 
 }
 
 HWND make_radio(HWND parent, const wchar_t* text, int id, int x, int y, int w, int h, bool first) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(g_main_hwnd, GWLP_USERDATA));
+  auto g = get_app_state(parent);
   HWND btn = CreateWindowExW(0, L"BUTTON", text,
                              CHILD_STYLE | BS_AUTORADIOBUTTON | (first ? WS_GROUP : 0),
                              x, y, w, h, parent,
@@ -588,8 +595,9 @@ void collect_overrides_from_seg_edits(AppState* g) {
 }
 
 void destroy_segment_table(AppState* g) {
-  for (HWND h : g->seg_edits) DestroyWindow(h);
-  for (HWND h : g->seg_promote_btns) DestroyWindow(h);
+  if (!g) return;
+  for (HWND h : g->seg_edits) { if (h) DestroyWindow(h); }
+  for (HWND h : g->seg_promote_btns) { if (h) DestroyWindow(h); }
   g->seg_edits.clear();
   g->seg_promote_btns.clear();
   g->last_segments.clear();
@@ -613,13 +621,14 @@ void set_mode(AppState* g, int which) {
   ShowWindow(g->count_label, which == 2 ? SW_SHOW : SW_HIDE);
   ShowWindow(g->seg_count_combo, which == 2 ? SW_SHOW : SW_HIDE);
   for (HWND h : g->length_boxes) {
-    ShowWindow(h, which == 2 ? SW_SHOW : SW_HIDE);
+    if (h) ShowWindow(h, which == 2 ? SW_SHOW : SW_HIDE);
   }
 }
 
 std::vector<std::size_t> parse_lengths(const AppState* g) {
   std::vector<std::size_t> out;
   for (HWND h : g->length_boxes) {
+    if (!h) continue;
     std::string t = regex_tool::trim(wide_to_utf8(get_edit_text(h)));
     if (t.empty()) continue;
     std::size_t v = 0;
@@ -643,11 +652,15 @@ std::vector<std::string> parse_separators(const AppState* g) {
 }
 
 void rebuild_length_boxes(HWND hwnd) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  auto g = get_app_state(hwnd);
   if (!g || !g->scroll_container) return;
   std::vector<std::string> old;
-  for (HWND h : g->length_boxes) old.push_back(wide_to_utf8(get_edit_text(h)));
-  for (HWND h : g->length_boxes) DestroyWindow(h);
+  for (HWND h : g->length_boxes) {
+    if (h) old.push_back(wide_to_utf8(get_edit_text(h)));
+  }
+  for (HWND h : g->length_boxes) {
+    if (h) DestroyWindow(h);
+  }
   g->length_boxes.clear();
   int cur = static_cast<int>(SendMessageW(g->seg_count_combo, CB_GETCURSEL, 0, 0));
   if (cur < 0) cur = 0;
@@ -662,11 +675,11 @@ void rebuild_length_boxes(HWND hwnd) {
 }
 
 void rebuild_segment_table(HWND hwnd) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  auto g = get_app_state(hwnd);
   if (!g || !g->scroll_container) return;
 
-  for (HWND h : g->seg_edits) DestroyWindow(h);
-  for (HWND h : g->seg_promote_btns) DestroyWindow(h);
+  for (HWND h : g->seg_edits) { if (h) DestroyWindow(h); }
+  for (HWND h : g->seg_promote_btns) { if (h) DestroyWindow(h); }
   g->seg_edits.clear();
   g->seg_promote_btns.clear();
 
@@ -767,7 +780,7 @@ std::string format_candidate_block(const regex_tool::CandidateVerdict& vd, size_
 }
 
 void run_generate(HWND hwnd) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  auto g = get_app_state(hwnd);
   if (!g) return;
 
   try {
@@ -835,7 +848,7 @@ void run_generate(HWND hwnd) {
 }
 
 void run_selftest(HWND hwnd) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  auto g = get_app_state(hwnd);
   if (!g) return;
   if (!g->has_selftest_candidate) {
     SetWindowTextW(g->selftest_label, L"自测: 请先生成候选正则");
@@ -880,21 +893,36 @@ std::wstring project_name(const AppState* g) {
 }
 
 void populate_projects(AppState* g) {
-  if (!g->project_combo) return;
+  if (!g || !g->project_combo) return;
   SendMessageW(g->project_combo, CB_RESETCONTENT, 0, 0);
-  WIN32_FIND_DATAW fd;
-  HANDLE h = FindFirstFileW((exe_dir() + L"\\*.rgx").c_str(), &fd);
-  if (h == INVALID_HANDLE_VALUE) return;
-  do {
-    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-      std::wstring name = fd.cFileName;
-      std::size_t dot = name.find_last_of(L'.');
-      if (dot != std::wstring::npos) name = name.substr(0, dot);
-      SendMessageW(g->project_combo, CB_ADDSTRING, 0,
-                   reinterpret_cast<LPARAM>(name.c_str()));
+
+  std::vector<std::wstring> dirs = { exe_dir() };
+  wchar_t cwd_buf[MAX_PATH];
+  if (GetCurrentDirectoryW(MAX_PATH, cwd_buf)) {
+    if (_wcsicmp(dirs[0].c_str(), cwd_buf) != 0) {
+      dirs.push_back(cwd_buf);
     }
-  } while (FindNextFileW(h, &fd));
-  FindClose(h);
+  }
+
+  std::vector<std::wstring> added;
+  for (const auto& dir : dirs) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*.rgx").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) continue;
+    do {
+      if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        std::wstring name = fd.cFileName;
+        std::size_t dot = name.find_last_of(L'.');
+        if (dot != std::wstring::npos) name = name.substr(0, dot);
+        if (std::find(added.begin(), added.end(), name) == added.end()) {
+          added.push_back(name);
+          SendMessageW(g->project_combo, CB_ADDSTRING, 0,
+                       reinterpret_cast<LPARAM>(name.c_str()));
+        }
+      }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
 }
 
 std::string serialize_project(const AppState* g) {
@@ -904,7 +932,8 @@ std::string serialize_project(const AppState* g) {
                                 : is_mode_lengths(g) ? "lengths" : "auto") + "\n";
   std::string lengths_text;
   for (size_t i = 0; i < g->length_boxes.size(); ++i) {
-    if (i) lengths_text += ",";
+    if (!g->length_boxes[i]) continue;
+    if (!lengths_text.empty()) lengths_text += ",";
     lengths_text += wide_to_utf8(get_edit_text(g->length_boxes[i]));
   }
   out += "lengths=" + lengths_text + "\n";
@@ -928,7 +957,7 @@ std::string serialize_project(const AppState* g) {
 }
 
 bool save_project(HWND hwnd) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  auto g = get_app_state(hwnd);
   if (!g) return false;
   std::wstring name = project_name(g);
   std::wstring path = exe_dir() + L"\\" + name + L".rgx";
@@ -945,12 +974,16 @@ bool save_project(HWND hwnd) {
 }
 
 bool load_project(HWND hwnd, const std::wstring& name, std::wstring& error) {
-  auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  auto g = get_app_state(hwnd);
   if (!g) return false;
   std::wstring path = exe_dir() + L"\\" + name + L".rgx";
   std::ifstream f(path, std::ios::binary);
   if (!f) {
-    error = L"无法打开项目文件: " + path;
+    path = name + L".rgx";
+    f.open(path, std::ios::binary);
+  }
+  if (!f) {
+    error = L"无法打开项目文件: " + name + L".rgx";
     return false;
   }
   std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -1034,16 +1067,23 @@ bool load_project(HWND hwnd, const std::wstring& name, std::wstring& error) {
     std::vector<std::string> parts;
     std::wstring cur;
     for (wchar_t c : lengths_text) {
-      if (c == L',') { if (!cur.empty()) { parts.push_back(wide_to_utf8(cur)); cur.clear(); } }
-      else cur += c;
+      if (c == L',') {
+        std::string s = regex_tool::trim(wide_to_utf8(cur));
+        if (!s.empty()) parts.push_back(s);
+        cur.clear();
+      } else {
+        cur += c;
+      }
     }
-    if (!cur.empty()) parts.push_back(wide_to_utf8(cur));
+    std::string s = regex_tool::trim(wide_to_utf8(cur));
+    if (!s.empty()) parts.push_back(s);
+
     int count = static_cast<int>(parts.size());
     if (count > 10) count = 10;
     if (count < 1) count = 1;
     SendMessageW(g->seg_count_combo, CB_SETCURSEL, count - 1, 0);
     rebuild_length_boxes(hwnd);
-    for (int i = 0; i < count && i < static_cast<int>(g->length_boxes.size()); ++i) {
+    for (size_t i = 0; i < parts.size() && i < g->length_boxes.size(); ++i) {
       SetWindowTextW(g->length_boxes[i], utf8_to_wide(parts[i]).c_str());
     }
   }
@@ -1055,14 +1095,17 @@ bool load_project(HWND hwnd, const std::wstring& name, std::wstring& error) {
   }
   clear_example_rows(g, false);
   clear_example_rows(g, true);
-  add_example_row(hwnd, false);
-  for (size_t i = 0; i < positives.size(); ++i) {
-    if (i > 0) add_example_row(hwnd, false);
-    SetWindowTextW(g->pos_edits[i], utf8_to_wide(positives[i]).c_str());
+  if (positives.empty()) {
+    add_example_row(hwnd, false);
+  } else {
+    for (const auto& p_str : positives) {
+      add_example_row(hwnd, false);
+      SetWindowTextW(g->pos_edits.back(), utf8_to_wide(p_str).c_str());
+    }
   }
-  for (size_t i = 0; i < negatives.size(); ++i) {
+  for (const auto& n_str : negatives) {
     add_example_row(hwnd, true);
-    SetWindowTextW(g->neg_edits.back(), utf8_to_wide(negatives[i]).c_str());
+    SetWindowTextW(g->neg_edits.back(), utf8_to_wide(n_str).c_str());
   }
   destroy_segment_table(g);
   run_generate(hwnd);
@@ -1585,12 +1628,15 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (sel != CB_ERR) {
           int len = static_cast<int>(SendMessageW(g->project_combo, CB_GETLBTEXTLEN, sel, 0));
           if (len > 0) {
-            std::wstring text(static_cast<size_t>(len), L'\0');
-            SendMessageW(g->project_combo, CB_GETLBTEXT, sel, reinterpret_cast<LPARAM>(text.data()));
-            std::wstring err;
-            if (!load_project(hwnd, text, err)) {
-              MessageBoxW(hwnd, err.c_str(), L"加载项目", MB_ICONERROR);
-              set_status(hwnd, L"加载失败: " + err);
+            std::wstring text(static_cast<size_t>(len + 1), L'\0');
+            LRESULT res = SendMessageW(g->project_combo, CB_GETLBTEXT, sel, reinterpret_cast<LPARAM>(text.data()));
+            if (res != CB_ERR) {
+              text.resize(static_cast<size_t>(len));
+              std::wstring err;
+              if (!load_project(hwnd, text, err)) {
+                MessageBoxW(hwnd, err.c_str(), L"加载项目", MB_ICONERROR);
+                set_status(hwnd, L"加载失败: " + err);
+              }
             }
           }
         }
@@ -1709,9 +1755,18 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+LONG WINAPI GlobalCrashHandler(EXCEPTION_POINTERS* ep) {
+  wchar_t buf[256];
+  wsprintfW(buf, L"程序发生异常 (Exception Code: 0x%08X)。", ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0);
+  MessageBoxW(nullptr, buf, L"RegexTool 异常提示", MB_ICONERROR | MB_OK);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+  SetUnhandledExceptionFilter(GlobalCrashHandler);
+
   // Initialize Common Controls v6 (P1-1)
   INITCOMMONCONTROLSEX icex{};
   icex.dwSize = sizeof(icex);

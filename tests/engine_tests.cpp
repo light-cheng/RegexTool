@@ -648,6 +648,15 @@ void test_trim_utility() {
   CHECK_EQ(regex_tool::trim("abc"), std::string("abc"));
 }
 
+void test_empty_positives_generate_returns_empty() {
+  regex_tool::Project p;
+  p.segment_config.use_lengths = false;
+  p.segment_config.use_separators = false;
+  auto result = regex_tool::generate(p);
+  CHECK(result.candidates.empty());
+  CHECK(!result.has_passing);
+}
+
 }  // namespace
 
 int main() {
@@ -690,6 +699,7 @@ int main() {
   test_field_captures_adjacent_fields();
   test_literal_hyphen_not_escaped();
   test_trim_utility();
+  test_empty_positives_generate_returns_empty();
 
   if (g_failures == 0) {
     std::printf("ALL TESTS PASSED\n");
