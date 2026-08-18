@@ -61,11 +61,25 @@ std::string charset_for(const std::set<char>& chars) {
 }
 
 std::string tag_from_literal(const std::string& literal) {
+  if (literal.empty()) return "";
   std::size_t end = literal.size();
+  while (end > 0 && (literal[end - 1] == '@' || literal[end - 1] == '|' || literal[end - 1] == '_' || literal[end - 1] == '-')) {
+    --end;
+  }
   while (end > 0 && std::isdigit(static_cast<unsigned char>(literal[end - 1]))) --end;
   std::size_t begin = end;
-  while (begin > 0 && std::isalpha(static_cast<unsigned char>(literal[begin - 1]))) --begin;
-  return literal.substr(begin, end - begin);
+  while (begin > 0 && (std::isalnum(static_cast<unsigned char>(literal[begin - 1])) || literal[begin - 1] == '-')) {
+    if (literal[begin - 1] == '@' || literal[begin - 1] == '|' || literal[begin - 1] == '_') break;
+    --begin;
+  }
+  std::string tag = literal.substr(begin, end - begin);
+  while (!tag.empty() && (tag.front() == '@' || tag.front() == '|' || tag.front() == '-' || tag.front() == '_')) {
+    tag.erase(tag.begin());
+  }
+  while (!tag.empty() && (tag.back() == '@' || tag.back() == '|' || tag.back() == '-' || tag.back() == '_')) {
+    tag.pop_back();
+  }
+  return tag;
 }
 
 // Classical positional segmentation (strictly non-constant positions become fields).
@@ -508,6 +522,7 @@ void apply_promotes(std::vector<SegmentRule>& segments, const std::vector<std::s
       out.push_back(std::move(seg));
       continue;
     }
+
     std::string rest = seg.literal;
     std::vector<SegmentRule> pieces;
     bool promoted_any = false;
@@ -519,33 +534,73 @@ void apply_promotes(std::vector<SegmentRule>& segments, const std::vector<std::s
                                       units[u].letter_end - units[u].letter_begin);
         if (std::find(tags.begin(), tags.end(), tag) != tags.end()) { pick = u; break; }
       }
-      if (pick == SIZE_MAX) break;
-      const TagUnit& unit = units[pick];
-      std::string tag = rest.substr(unit.letter_begin, unit.letter_end - unit.letter_begin);
-      if (unit.letter_begin > 0) {
-        SegmentRule f;
-        f.is_literal = true;
-        f.literal = rest.substr(0, unit.letter_begin);
-        pieces.push_back(std::move(f));
+
+      if (pick != SIZE_MAX) {
+        const TagUnit& unit = units[pick];
+        std::string tag = rest.substr(unit.letter_begin, unit.letter_end - unit.letter_begin);
+        if (unit.letter_begin > 0) {
+          SegmentRule f;
+          f.is_literal = true;
+          f.literal = rest.substr(0, unit.letter_begin);
+          pieces.push_back(std::move(f));
+        }
+        SegmentRule tag_seg;
+        tag_seg.is_literal = true;
+        tag_seg.literal = tag;
+        pieces.push_back(std::move(tag_seg));
+
+        SegmentRule field_seg;
+        field_seg.is_literal = false;
+        field_seg.field.name = tag;
+        std::set<char> value_chars;
+        for (std::size_t k = unit.letter_end; k < unit.digit_end; ++k) value_chars.insert(rest[k]);
+        field_seg.field.charset = charset_for(value_chars);
+        field_seg.field.min_len = unit.digit_end - unit.letter_end;
+        field_seg.field.max_len = unit.digit_end - unit.letter_end;
+        pieces.push_back(std::move(field_seg));
+
+        rest = rest.substr(unit.digit_end);
+        promoted_any = true;
+        continue;
       }
-      SegmentRule tag_seg;
-      tag_seg.is_literal = true;
-      tag_seg.literal = tag;
-      pieces.push_back(std::move(tag_seg));
 
-      SegmentRule field_seg;
-      field_seg.is_literal = false;
-      field_seg.field.name = tag;
-      std::set<char> value_chars;
-      for (std::size_t k = unit.letter_end; k < unit.digit_end; ++k) value_chars.insert(rest[k]);
-      field_seg.field.charset = charset_for(value_chars);
-      field_seg.field.min_len = unit.digit_end - unit.letter_end;
-      field_seg.field.max_len = unit.digit_end - unit.letter_end;
-      pieces.push_back(std::move(field_seg));
+      // Check if any tag in tags is a pure digit chunk (e.g. "2634" or "2026") that is a substring of rest
+      bool found_sub = false;
+      for (const auto& tag : tags) {
+        bool tag_digits = !tag.empty();
+        for (char c : tag) {
+          if (!std::isdigit(static_cast<unsigned char>(c))) { tag_digits = false; break; }
+        }
+        if (!tag_digits) continue;
 
-      rest = rest.substr(unit.digit_end);
-      promoted_any = true;
+        std::size_t sub_pos = rest.find(tag);
+        if (sub_pos != std::string::npos) {
+          if (sub_pos > 0) {
+            SegmentRule f;
+            f.is_literal = true;
+            f.literal = rest.substr(0, sub_pos);
+            pieces.push_back(std::move(f));
+          }
+          SegmentRule field_seg;
+          field_seg.is_literal = false;
+          field_seg.field.name = tag;
+          field_seg.field.charset = "\\d";
+          field_seg.field.min_len = tag.size();
+          field_seg.field.max_len = tag.size();
+          pieces.push_back(std::move(field_seg));
+
+          rest = rest.substr(sub_pos + tag.size());
+          promoted_any = true;
+          found_sub = true;
+          break;
+        }
+      }
+
+      if (!found_sub) {
+        break;
+      }
     }
+
     if (!promoted_any) {
       out.push_back(std::move(seg));
       continue;
@@ -563,14 +618,49 @@ void apply_promotes(std::vector<SegmentRule>& segments, const std::vector<std::s
 
 void apply_overrides(std::vector<SegmentRule>& segments, const std::vector<FieldRule>& overrides) {
   if (overrides.empty()) return;
-  for (auto& seg : segments) {
-    if (seg.is_literal) continue;
-    for (const auto& ov : overrides) {
-      if (ov.name == seg.field.name) {
+  for (const auto& ov : overrides) {
+    bool matched_field = false;
+    for (auto& seg : segments) {
+      if (!seg.is_literal && ov.name == seg.field.name) {
         seg.field.charset = ov.charset;
         seg.field.min_len = ov.min_len;
         seg.field.max_len = ov.max_len;
+        matched_field = true;
       }
+    }
+    if (!matched_field) {
+      std::vector<SegmentRule> next_segs;
+      bool replaced_any = false;
+      for (auto& seg : segments) {
+        if (seg.is_literal && !replaced_any) {
+          std::size_t pos = seg.literal.find(ov.name);
+          if (pos != std::string::npos) {
+            if (pos > 0) {
+              SegmentRule pre;
+              pre.is_literal = true;
+              pre.literal = seg.literal.substr(0, pos);
+              next_segs.push_back(std::move(pre));
+            }
+            SegmentRule f;
+            f.is_literal = false;
+            f.field.name = ov.name;
+            f.field.charset = ov.charset;
+            f.field.min_len = ov.min_len;
+            f.field.max_len = ov.max_len;
+            next_segs.push_back(std::move(f));
+            if (pos + ov.name.size() < seg.literal.size()) {
+              SegmentRule post;
+              post.is_literal = true;
+              post.literal = seg.literal.substr(pos + ov.name.size());
+              next_segs.push_back(std::move(post));
+            }
+            replaced_any = true;
+            continue;
+          }
+        }
+        next_segs.push_back(std::move(seg));
+      }
+      if (replaced_any) segments = std::move(next_segs);
     }
   }
 }
@@ -778,7 +868,85 @@ std::vector<std::string> promotable_tags(const std::string& literal) {
   for (const auto& unit : scan_tag_units(literal)) {
     tags.push_back(literal.substr(unit.letter_begin, unit.letter_end - unit.letter_begin));
   }
+  if (tags.empty() && !literal.empty()) {
+    bool all_punct = true;
+    for (char c : literal) {
+      if (std::isalnum(static_cast<unsigned char>(c))) { all_punct = false; break; }
+    }
+    if (!all_punct) {
+      tags.push_back(literal);
+    }
+  }
   return tags;
+}
+
+std::vector<std::string> detect_separators(const std::vector<std::string>& positives) {
+  if (positives.empty()) return {};
+
+  std::vector<std::string> cleaned;
+  for (const auto& s : positives) {
+    std::string t = trim(s);
+    if (!t.empty()) cleaned.push_back(t);
+  }
+  if (cleaned.empty()) return {};
+
+  const std::string kDelimChars = "@|_#/:,;";
+  std::set<char> found_delims;
+  for (char d : kDelimChars) {
+    bool consistent = true;
+    std::size_t count0 = 0;
+    for (char c : cleaned[0]) if (c == d) ++count0;
+    if (count0 == 0) continue;
+    for (const auto& s : cleaned) {
+      std::size_t c_cnt = 0;
+      for (char c : s) if (c == d) ++c_cnt;
+      if (c_cnt != count0) { consistent = false; break; }
+    }
+    if (consistent) found_delims.insert(d);
+  }
+
+  std::vector<std::string> detected;
+  for (char d : found_delims) {
+    detected.push_back(std::string(1, d));
+  }
+
+  if (cleaned.size() >= 2) {
+    std::size_t min_len = SIZE_MAX;
+    for (const auto& s : cleaned) min_len = std::min(min_len, s.size());
+    std::vector<bool> is_const(min_len, true);
+    for (std::size_t p = 0; p < min_len; ++p) {
+      char c = cleaned[0][p];
+      for (const auto& s : cleaned) {
+        if (s[p] != c) { is_const[p] = false; break; }
+      }
+    }
+
+    std::size_t p = 0;
+    while (p < min_len) {
+      if (is_const[p]) {
+        std::size_t q = p;
+        while (q < min_len && is_const[q]) ++q;
+        std::string token = cleaned[0].substr(p, q - p);
+        if (token.size() >= 2 && token.size() <= 6) {
+          bool has_letter = false, has_punct = false;
+          for (char c : token) {
+            if (std::isalpha(static_cast<unsigned char>(c))) has_letter = true;
+            if (found_delims.find(c) != found_delims.end()) has_punct = true;
+          }
+          if (!has_punct && has_letter && (p > 0 || q < min_len)) {
+            if (std::find(detected.begin(), detected.end(), token) == detected.end()) {
+              detected.push_back(token);
+            }
+          }
+        }
+        p = q;
+      } else {
+        ++p;
+      }
+    }
+  }
+
+  return detected;
 }
 
 GenerationResult generate(const Project& project) {

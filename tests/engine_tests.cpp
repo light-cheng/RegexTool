@@ -667,9 +667,52 @@ void test_user_reported_barcode_scenario() {
   CHECK(!res.candidates.empty());
   if (!res.candidates.empty()) {
     auto v = regex_tool::verify_example(res.candidates[0].candidate, test_barcode);
-    std::printf("  Test barcode '%s' -> passed: %s, failing_seg: %zu\n",
-                test_barcode.c_str(), v.passed ? "true" : "false", v.failing_segment);
+    CHECK(v.passed);
   }
+}
+
+void test_detect_separators_alnum_and_punct() {
+  // Story 8 & 9: Auto-detect punctuation and alphanumeric markers
+  auto seps1 = regex_tool::detect_separators({"PN8821@BN9012@DT2026", "PN8822@BN9012@DT2026"});
+  CHECK(!seps1.empty());
+  CHECK(std::find(seps1.begin(), seps1.end(), "@") != seps1.end());
+
+  auto seps2 = regex_tool::detect_separators({"1P123456NQ7890123N3456", "1P998877NQ1122333N0012"});
+  CHECK(seps2.size() >= 2u);
+  bool has_1p = false, has_nq = false, has_3n = false;
+  for (const auto& s : seps2) {
+    if (s == "1P") has_1p = true;
+    if (s == "NQ") has_nq = true;
+    if (s == "3N") has_3n = true;
+  }
+  CHECK(has_1p || has_nq || has_3n);
+}
+
+void test_promote_pure_digit_constant_segment() {
+  // Story 15: Promote constant pure digit segment (e.g. 2634 or 2026) to a field
+  regex_tool::Project p;
+  p.positives = {"PN-A10402@2634@Q1000", "PN-A10402@2634@Q2000"};
+  p.segment_config.promote_tags = {"2634"};
+  auto result = regex_tool::generate(p);
+  CHECK(result.has_passing);
+  CHECK_EQ(first_regex(result), std::string("^PN-A10402@\\d{4}@Q\\d{4}$"));
+  CHECK(result.candidates.front().passes_all);
+}
+
+void test_field_override_literal_to_field() {
+  // Story 15: In-place manual override of constant segment to field
+  regex_tool::Project p;
+  p.positives = {"PN-A10402@2634@Q1000", "PN-A10402@2634@Q2000"};
+  regex_tool::FieldRule ov;
+  ov.name = "2634";
+  ov.charset = "\\d";
+  ov.min_len = 4;
+  ov.max_len = 4;
+  p.segment_config.field_overrides = {ov};
+  auto result = regex_tool::generate(p);
+  CHECK(result.has_passing);
+  CHECK_EQ(first_regex(result), std::string("^PN-A10402@\\d{4}@Q\\d{4}$"));
+  CHECK(result.candidates.front().passes_all);
 }
 
 }  // namespace
@@ -713,6 +756,9 @@ int main() {
   test_invalid_regex_no_crash();
   test_charset_matches_ranges_and_custom_classes();
   test_field_captures_adjacent_fields();
+  test_detect_separators_alnum_and_punct();
+  test_promote_pure_digit_constant_segment();
+  test_field_override_literal_to_field();
   test_literal_hyphen_not_escaped();
   test_trim_utility();
   test_empty_positives_generate_returns_empty();

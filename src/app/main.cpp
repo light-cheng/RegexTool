@@ -51,7 +51,8 @@ constexpr int IDC_COPY_CAP_REGEX = 1017;
 constexpr int IDC_RESULT_EDIT = 1018;
 constexpr int IDC_SELFTEST_EDIT = 1019;
 constexpr int IDC_SELFTEST_BTN = 1020;
-constexpr int IDC_STATUSBAR = 1021;
+constexpr int IDC_DETECT_SEP = 1021;
+constexpr int IDC_STATUSBAR = 1022;
 
 // Dynamic rows ID intervals
 constexpr int IDC_POS_EDIT_BASE = 2000;      // 2000 .. 2499
@@ -111,7 +112,7 @@ struct AppState {
   // Controls - Scrollable Viewport (Children of scroll_container)
   HWND pos_label = nullptr, neg_label = nullptr, cfg_label = nullptr;
   HWND mode_auto = nullptr, mode_sep = nullptr, mode_len = nullptr;
-  HWND sep_label = nullptr, sep_edit = nullptr;
+  HWND sep_label = nullptr, sep_edit = nullptr, detect_sep_btn = nullptr;
   HWND count_label = nullptr, seg_count_combo = nullptr;
   std::vector<HWND> length_boxes;
   std::vector<HWND> pos_edits, pos_dels;
@@ -585,13 +586,28 @@ void collect_overrides_from_seg_edits(AppState* g) {
   g->field_overrides.clear();
   for (size_t i = 0; i < g->seg_edits.size() && i < g->last_segments.size(); ++i) {
     const auto& seg = g->last_segments[i];
-    if (seg.is_literal) continue;
     std::string text = wide_to_utf8(get_edit_text(g->seg_edits[i]));
     std::size_t p = text.find(": ");
     if (p == std::string::npos) continue;
+
+    std::string header = text.substr(0, p);
+    std::string rule_part = text.substr(p + 2);
+
+    std::string field_name;
+    std::size_t f_pos = header.find("字段 ");
+    if (f_pos != std::string::npos) {
+      field_name = regex_tool::trim(header.substr(f_pos + 7));
+    } else if (!seg.is_literal) {
+      field_name = seg.field.name;
+    } else {
+      continue;
+    }
+
+    if (field_name.empty()) field_name = seg.is_literal ? seg.literal : seg.field.name;
+
     regex_tool::FieldRule ov;
-    ov.name = seg.field.name;
-    if (parse_rule_text(text.substr(p + 2), ov.charset, ov.min_len, ov.max_len)) {
+    ov.name = field_name;
+    if (parse_rule_text(rule_part, ov.charset, ov.min_len, ov.max_len)) {
       g->field_overrides.push_back(ov);
     }
   }
@@ -621,6 +637,7 @@ void set_mode(AppState* g, int which) {
 
   ShowWindow(g->sep_label, which == 1 ? SW_SHOW : SW_HIDE);
   ShowWindow(g->sep_edit, which == 1 ? SW_SHOW : SW_HIDE);
+  ShowWindow(g->detect_sep_btn, which == 1 ? SW_SHOW : SW_HIDE);
   ShowWindow(g->count_label, which == 2 ? SW_SHOW : SW_HIDE);
   ShowWindow(g->seg_count_combo, which == 2 ? SW_SHOW : SW_HIDE);
   for (HWND h : g->length_boxes) {
@@ -692,10 +709,8 @@ void rebuild_segment_table(HWND hwnd) {
   for (size_t i = 0; i < g->last_segments.size(); ++i) {
     const auto& seg = g->last_segments[i];
     std::string text = std::to_string(i + 1) + ". ";
-    DWORD extra = 0;
     if (seg.is_literal) {
       text += "固定: " + seg.literal;
-      extra = ES_READONLY;
     } else {
       text += "字段 " + seg.field.name + ": ";
       bool overridden = false;
@@ -708,7 +723,7 @@ void rebuild_segment_table(HWND hwnd) {
       }
       if (!overridden) text += field_rule_text(seg.field);
     }
-    HWND edit = make_edit(g->scroll_container, IDC_SEG_EDIT_BASE + static_cast<int>(i), 0, 0, g->scale_dpi(320), g->scale_dpi(BASE_CTRL_H), extra);
+    HWND edit = make_edit(g->scroll_container, IDC_SEG_EDIT_BASE + static_cast<int>(i), 0, 0, g->scale_dpi(320), g->scale_dpi(BASE_CTRL_H), 0);
     SetWindowTextW(edit, utf8_to_wide(text).c_str());
 
     if (seg.is_literal) {
@@ -1204,8 +1219,11 @@ void layout_scroll_content(HWND scroll_hwnd) {
   y += row_h;
 
   if (is_mode_separators(g)) {
-    MoveWindow(g->sep_label, 0, y, g->scale_dpi(64), ctrl_h, TRUE);
-    MoveWindow(g->sep_edit, g->scale_dpi(68), y, g->scale_dpi(130), ctrl_h, TRUE);
+    MoveWindow(g->sep_label, 0, y, g->scale_dpi(50), ctrl_h, TRUE);
+    int detect_w = g->scale_dpi(72);
+    int edit_sep_w = edit_w - g->scale_dpi(54) - detect_w - g->scale_dpi(4);
+    MoveWindow(g->sep_edit, g->scale_dpi(52), y, edit_sep_w, ctrl_h, TRUE);
+    MoveWindow(g->detect_sep_btn, g->scale_dpi(52) + edit_sep_w + g->scale_dpi(4), y, detect_w, ctrl_h, TRUE);
     y += row_h;
   } else if (is_mode_lengths(g)) {
     MoveWindow(g->count_label, 0, y, g->scale_dpi(46), ctrl_h, TRUE);
@@ -1454,7 +1472,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       g->mode_len = make_radio(sc, L"按长度", IDC_MODE_LEN, 0, 0, 0, 0, false);
 
       g->sep_label = make_static(sc, L"分隔符:", 0, 0, 0, 0);
-      g->sep_edit = make_edit(sc, IDC_SEP_EDIT, 0, 0, 0, 0, 0, L"如 @ 或 @,|");
+      g->sep_edit = make_edit(sc, IDC_SEP_EDIT, 0, 0, 0, 0, 0, L"如 @ 或 1P,NQ,3N");
+      g->detect_sep_btn = make_button(sc, L"自动识别", IDC_DETECT_SEP, 0, 0, 0, 0);
       g->count_label = make_static(sc, L"段数:", 0, 0, 0, 0);
       g->seg_count_combo = make_combo(sc, IDC_SEG_COUNT_COMBO, 0, 0, 0, 0, false);
       for (int i = 1; i <= 10; ++i) {
@@ -1702,7 +1721,38 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (id == IDC_BATCH_POS) { run_batch_dialog(hwnd, false); return 0; }
       if (id == IDC_BATCH_NEG) { run_batch_dialog(hwnd, true); return 0; }
       if (id == IDC_MODE_AUTO) { set_mode(g, 0); layout_scroll_content(g->scroll_container); return 0; }
-      if (id == IDC_MODE_SEP) { set_mode(g, 1); layout_scroll_content(g->scroll_container); return 0; }
+      if (id == IDC_MODE_SEP) {
+        set_mode(g, 1);
+        std::wstring cur_sep = get_edit_text(g->sep_edit);
+        if (cur_sep.empty()) {
+          auto seps = regex_tool::detect_separators(collect_edits(g->pos_edits));
+          if (!seps.empty()) {
+            std::string sep_str;
+            for (size_t i = 0; i < seps.size(); ++i) {
+              if (i > 0) sep_str += ",";
+              sep_str += seps[i];
+            }
+            SetWindowTextW(g->sep_edit, utf8_to_wide(sep_str).c_str());
+          }
+        }
+        layout_scroll_content(g->scroll_container);
+        return 0;
+      }
+      if (id == IDC_DETECT_SEP) {
+        auto seps = regex_tool::detect_separators(collect_edits(g->pos_edits));
+        if (!seps.empty()) {
+          std::string sep_str;
+          for (size_t i = 0; i < seps.size(); ++i) {
+            if (i > 0) sep_str += ",";
+            sep_str += seps[i];
+          }
+          SetWindowTextW(g->sep_edit, utf8_to_wide(sep_str).c_str());
+          set_status(hwnd, L"已自动识别分隔标记: " + utf8_to_wide(sep_str));
+        } else {
+          set_status(hwnd, L"未在正例中检测到一致的分隔标记，请手动输入");
+        }
+        return 0;
+      }
       if (id == IDC_MODE_LEN) { set_mode(g, 2); layout_scroll_content(g->scroll_container); return 0; }
       if (id == IDC_GENERATE) { run_generate(hwnd); return 0; }
       if (id == IDC_COPY_REGEX) {

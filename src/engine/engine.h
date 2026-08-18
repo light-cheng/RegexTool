@@ -96,6 +96,9 @@ ExampleVerdict verify_example(const Candidate& candidate, const std::string& exa
 // immediately followed by digits, e.g. "@DT2026@LT" -> {"DT"}.
 std::vector<std::string> promotable_tags(const std::string& literal);
 
+// Auto-detect consistent delimiters (e.g. "@", "|", "-") and alphanumeric markers (e.g. "1P", "NQ", "3N") from positive examples.
+std::vector<std::string> detect_separators(const std::vector<std::string>& positives);
+
 // Compose anchored non-capturing regex.
 std::string compose_regex(const std::vector<SegmentRule>& segments);
 
