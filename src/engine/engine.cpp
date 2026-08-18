@@ -283,14 +283,16 @@ std::vector<SegmentRule> segment_positives_semantic(const std::vector<std::strin
         while (digit_start > 0 && std::isdigit(static_cast<unsigned char>(lit[digit_start - 1]))) {
           --digit_start;
         }
-        if (digit_start < lit.size() && digit_start > 0) {
-          // Keep the non-digit prefix as literal
-          SegmentRule seg;
-          seg.is_literal = true;
-          seg.literal = lit.substr(0, digit_start);
-          segments.push_back(std::move(seg));
+        if (digit_start < lit.size()) {
+          // Keep the non-digit prefix as literal (if any)
+          if (digit_start > 0) {
+            SegmentRule seg;
+            seg.is_literal = true;
+            seg.literal = lit.substr(0, digit_start);
+            segments.push_back(std::move(seg));
+          }
 
-          // The trailing constant digits merge with the variable digits
+          // The trailing or full constant digits merge with the variable digits
           std::size_t num_start = p + digit_start;
           std::size_t num_end = q;
           while (num_end < max_len && (cats[num_end] == CAT_DIGIT || (is_const[num_end] && std::isdigit(static_cast<unsigned char>(positives[0][num_end]))))) {
@@ -415,59 +417,89 @@ std::vector<SegmentRule> segment_by_separators(const std::vector<std::string>& p
                                                const std::vector<std::string>& separators,
                                                bool semantic,
                                                std::vector<std::string>& warnings) {
-  struct Hit {
-    std::size_t pos;
-    std::string sep;
-  };
-  std::vector<Hit> hits;
-  const std::string& first = positives[0];
-  std::size_t i = 0;
-  while (i < first.size()) {
-    bool matched = false;
-    for (const auto& sep : separators) {
-      if (sep.empty()) continue;
-      if (first.compare(i, sep.size(), sep) == 0) {
-        hits.push_back({i, sep});
-        i += sep.size();
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) ++i;
-  }
-  if (hits.empty()) return {};
+  if (positives.empty() || separators.empty()) return {};
 
-  for (const auto& s : positives) {
-    for (const auto& h : hits) {
-      if (s.size() < h.pos + h.sep.size() || s.compare(h.pos, h.sep.size(), h.sep) != 0) {
-        warnings.push_back("各正例的分隔符位置不一致，已改用自动分段");
-        return {};
+  std::vector<std::string> seps;
+  for (const auto& s : separators) {
+    std::string t = trim(s);
+    if (!t.empty()) seps.push_back(t);
+  }
+  if (seps.empty()) return {};
+
+  std::vector<std::vector<std::string>> all_chunks;
+  std::vector<std::vector<std::string>> all_seps;
+
+  for (const auto& raw_s : positives) {
+    std::string s = trim(raw_s);
+    std::vector<std::string> chunks;
+    std::vector<std::string> matched_seps;
+
+    if (seps.size() == 1) {
+      const std::string& sep = seps[0];
+      std::size_t start = 0;
+      while (start <= s.size()) {
+        std::size_t pos = s.find(sep, start);
+        if (pos == std::string::npos) {
+          chunks.push_back(s.substr(start));
+          break;
+        } else {
+          chunks.push_back(s.substr(start, pos - start));
+          matched_seps.push_back(sep);
+          start = pos + sep.size();
+        }
       }
+    } else {
+      // Sequential custom markers (e.g. 1P, NQ, 3N or EP, 3N, NG)
+      std::size_t start = 0;
+      for (std::size_t k = 0; k < seps.size(); ++k) {
+        const std::string& sep = seps[k];
+        std::size_t pos = s.find(sep, start);
+        if (pos != std::string::npos) {
+          chunks.push_back(s.substr(start, pos - start));
+          matched_seps.push_back(sep);
+          start = pos + sep.size();
+        } else {
+          break;
+        }
+      }
+      chunks.push_back(s.substr(start));
     }
+
+    // Clean any accidental empty trailing chunk if barcode has extra trailing delimiter
+    while (chunks.size() > 1 && chunks.back().empty()) {
+      chunks.pop_back();
+      if (!matched_seps.empty()) matched_seps.pop_back();
+    }
+
+    all_chunks.push_back(std::move(chunks));
+    all_seps.push_back(std::move(matched_seps));
   }
 
-  std::size_t nchunks = hits.size() + 1;
-  std::vector<std::vector<std::string>> chunks(nchunks);
-  for (const auto& s : positives) {
-    std::size_t start = 0;
-    for (std::size_t c = 0; c < nchunks; ++c) {
-      std::size_t end = (c < hits.size()) ? hits[c].pos : s.size();
-      chunks[c].push_back(s.substr(start, end > start ? end - start : 0));
-      if (c < hits.size()) start = hits[c].pos + hits[c].sep.size();
+  std::size_t nchunks = all_chunks[0].size();
+  for (std::size_t i = 1; i < all_chunks.size(); ++i) {
+    if (all_chunks[i].size() != nchunks) {
+      warnings.push_back("各正例的分隔符/标记数量不一致，已改用自动分段");
+      return {};
     }
   }
 
   std::vector<SegmentRule> segments;
   for (std::size_t c = 0; c < nchunks; ++c) {
-    auto sub = semantic ? segment_positives_semantic(chunks[c]) : segment_positives_exact(chunks[c]);
+    std::vector<std::string> col(positives.size());
+    for (std::size_t i = 0; i < positives.size(); ++i) {
+      col[i] = all_chunks[i][c];
+    }
+    auto sub = semantic ? segment_positives_semantic(col) : segment_positives_exact(col);
     for (auto& seg : sub) segments.push_back(std::move(seg));
-    if (c < hits.size()) {
+
+    if (c < all_seps[0].size()) {
       SegmentRule lit;
       lit.is_literal = true;
-      lit.literal = hits[c].sep;
+      lit.literal = all_seps[0][c];
       segments.push_back(std::move(lit));
     }
   }
+
   return segments;
 }
 
@@ -966,6 +998,25 @@ GenerationResult generate(const Project& project) {
   if (cleaned.empty()) return result;
 
   const auto& cfg = project.segment_config;
+
+  if (cfg.use_separators && cfg.separators.size() == 1) {
+    const std::string& sep = cfg.separators[0];
+    if (!sep.empty()) {
+      bool any_has_trailing = false, any_no_trailing = false;
+      for (const auto& s : cleaned) {
+        if (s.size() > sep.size() && s.rfind(sep) == s.size() - sep.size()) any_has_trailing = true;
+        else any_no_trailing = true;
+      }
+      if (any_has_trailing && any_no_trailing) {
+        for (auto& s : cleaned) {
+          if (s.size() > sep.size() && s.rfind(sep) == s.size() - sep.size()) {
+            s = s.substr(0, s.size() - sep.size());
+          }
+        }
+        result.warnings.push_back("正例末尾多余的分隔符已自动去除并校正");
+      }
+    }
+  }
 
   // 1. Build the Smart Semantic Segment Model
   std::vector<SegmentRule> smart_segments;

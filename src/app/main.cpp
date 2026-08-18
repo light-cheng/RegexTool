@@ -53,6 +53,7 @@ constexpr int IDC_SELFTEST_EDIT = 1019;
 constexpr int IDC_SELFTEST_BTN = 1020;
 constexpr int IDC_DETECT_SEP = 1021;
 constexpr int IDC_STATUSBAR = 1022;
+constexpr int IDC_CANDIDATE_COMBO = 1024;
 
 // Dynamic rows ID intervals
 constexpr int IDC_POS_EDIT_BASE = 2000;      // 2000 .. 2499
@@ -118,13 +119,13 @@ struct AppState {
   std::vector<HWND> pos_edits, pos_dels;
   std::vector<HWND> neg_edits, neg_dels;
   HWND add_pos = nullptr, add_neg = nullptr, batch_pos = nullptr, batch_neg = nullptr;
-  std::vector<HWND> seg_edits, seg_promote_btns;
 
   // Controls - Fixed Left Pane Footer
   HWND generate_btn = nullptr;
 
   // Controls - Right Pane
   HWND rec_header_label = nullptr;
+  HWND candidate_combo = nullptr;
   HWND copy_btn = nullptr;
   HWND copy_cap_btn = nullptr;
   HWND rec_regex_edit = nullptr;
@@ -144,6 +145,8 @@ struct AppState {
   std::vector<regex_tool::SegmentRule> last_segments;
   std::vector<std::string> promote_tags;
   std::vector<regex_tool::FieldRule> field_overrides;
+  std::vector<regex_tool::CandidateVerdict> last_candidates;
+  int selected_candidate_index = 0;
   regex_tool::Candidate selftest_candidate;
   bool has_selftest_candidate = false;
   std::string recommended_regex;
@@ -605,47 +608,6 @@ bool parse_rule_text(const std::string& raw, std::string& charset, std::size_t& 
   return min_len <= max_len;
 }
 
-void collect_overrides_from_seg_edits(AppState* g) {
-  if (g->seg_edits.empty()) return;
-  g->field_overrides.clear();
-  for (size_t i = 0; i < g->seg_edits.size() && i < g->last_segments.size(); ++i) {
-    const auto& seg = g->last_segments[i];
-    std::string text = wide_to_utf8(get_edit_text(g->seg_edits[i]));
-    std::size_t p = text.find(": ");
-    if (p == std::string::npos) continue;
-
-    std::string header = text.substr(0, p);
-    std::string rule_part = text.substr(p + 2);
-
-    std::string field_name;
-    std::size_t f_pos = header.find("字段 ");
-    if (f_pos != std::string::npos) {
-      field_name = regex_tool::trim(header.substr(f_pos + 7));
-    } else if (!seg.is_literal) {
-      field_name = seg.field.name;
-    } else {
-      continue;
-    }
-
-    if (field_name.empty()) field_name = seg.is_literal ? seg.literal : seg.field.name;
-
-    regex_tool::FieldRule ov;
-    ov.name = field_name;
-    if (parse_rule_text(rule_part, ov.charset, ov.min_len, ov.max_len)) {
-      g->field_overrides.push_back(ov);
-    }
-  }
-}
-
-void destroy_segment_table(AppState* g) {
-  if (!g) return;
-  for (HWND h : g->seg_edits) { if (h) DestroyWindow(h); }
-  for (HWND h : g->seg_promote_btns) { if (h) DestroyWindow(h); }
-  g->seg_edits.clear();
-  g->seg_promote_btns.clear();
-  g->last_segments.clear();
-}
-
 bool is_mode_lengths(const AppState* g) {
   return SendMessageW(g->mode_len, BM_GETCHECK, 0, 0) == BST_CHECKED;
 }
@@ -718,58 +680,6 @@ void rebuild_length_boxes(HWND hwnd) {
   layout_scroll_content(g->scroll_container);
 }
 
-void rebuild_segment_table(HWND hwnd) {
-  auto g = get_app_state(hwnd);
-  if (!g || !g->scroll_container) return;
-
-  for (HWND h : g->seg_edits) { if (h) DestroyWindow(h); }
-  for (HWND h : g->seg_promote_btns) { if (h) DestroyWindow(h); }
-  g->seg_edits.clear();
-  g->seg_promote_btns.clear();
-
-  for (size_t i = 0; i < g->last_segments.size(); ++i) {
-    g->seg_promote_btns.push_back(nullptr);
-  }
-  for (size_t i = 0; i < g->last_segments.size(); ++i) {
-    const auto& seg = g->last_segments[i];
-    std::string text = std::to_string(i + 1) + ". ";
-    if (seg.is_literal) {
-      text += "固定: " + seg.literal;
-    } else {
-      text += "字段 " + seg.field.name + ": ";
-      bool overridden = false;
-      for (const auto& ov : g->field_overrides) {
-        if (ov.name == seg.field.name) {
-          text += field_rule_text(ov);
-          overridden = true;
-          break;
-        }
-      }
-      if (!overridden) text += field_rule_text(seg.field);
-    }
-    HWND edit = make_edit(g->scroll_container, IDC_SEG_EDIT_BASE + static_cast<int>(i), 0, 0, g->scale_dpi(320), g->scale_dpi(BASE_CTRL_H), 0);
-    SetWindowTextW(edit, utf8_to_wide(text).c_str());
-
-    if (seg.is_literal) {
-      auto tags = regex_tool::promotable_tags(seg.literal);
-      if (!tags.empty()) {
-        bool any_promoted = false;
-        for (const auto& t : tags) {
-          if (std::find(g->promote_tags.begin(), g->promote_tags.end(), t) != g->promote_tags.end()) {
-            any_promoted = true;
-            break;
-          }
-        }
-        HWND btn = make_button(g->scroll_container, any_promoted ? L"还原" : L"提升",
-                               IDC_SEG_PROMOTE_BASE + static_cast<int>(i),
-                               0, 0, g->scale_dpi(48), g->scale_dpi(BASE_CTRL_H));
-        g->seg_promote_btns[i] = btn;
-      }
-    }
-    g->seg_edits.push_back(edit);
-  }
-}
-
 std::string format_candidate_block(const regex_tool::CandidateVerdict& vd, size_t index, bool recommended) {
   std::string tag = vd.candidate.display_name.empty() ? vd.candidate.variant : vd.candidate.display_name;
   std::string out;
@@ -824,13 +734,13 @@ std::string format_candidate_block(const regex_tool::CandidateVerdict& vd, size_
   return out;
 }
 
+void run_selftest(HWND hwnd);
+
 void run_generate(HWND hwnd) {
   auto g = get_app_state(hwnd);
   if (!g) return;
 
   try {
-    collect_overrides_from_seg_edits(g);
-
     regex_tool::Project p;
     p.positives = collect_edits(g->pos_edits);
     p.negatives = collect_edits(g->neg_edits);
@@ -844,16 +754,40 @@ void run_generate(HWND hwnd) {
 
     auto result = regex_tool::generate(p);
 
+    g->last_candidates = result.candidates;
+    g->selected_candidate_index = 0;
+    if (g->candidate_combo) SendMessageW(g->candidate_combo, CB_RESETCONTENT, 0, 0);
+
     if (result.candidates.empty()) {
       g->recommended_regex.clear();
       g->recommended_capturing_regex.clear();
+      g->has_selftest_candidate = false;
       SetWindowTextW(g->rec_regex_edit, L"");
-      SetWindowTextW(g->result_edit, L"（请在左侧至少输入一条正例条码，然后点击\"生成\"）");
+      SetWindowTextW(g->result_edit, L"（请在左侧至少输入一条正例条码，然后点击\"生成候选正则\"）");
+      SetWindowTextW(g->selftest_label, L"自测: 待生成");
       set_status(hwnd, L"提示: 请至少输入一条正例条码");
     } else {
-      g->recommended_regex = result.candidates.front().candidate.regex;
-      g->recommended_capturing_regex = result.candidates.front().candidate.capturing_regex;
-      SetWindowTextW(g->rec_regex_edit, utf8_to_wide(g->recommended_regex).c_str());
+      for (size_t i = 0; i < result.candidates.size(); ++i) {
+        const auto& cv = result.candidates[i];
+        std::string name = cv.candidate.display_name.empty() ? cv.candidate.variant : cv.candidate.display_name;
+        std::wstring item = std::to_wstring(i + 1) + L". " + utf8_to_wide(name);
+        if (cv.passes_all) item += L" [通过 ✓]";
+        else item += L" [未全通过 ✗]";
+        if (i == 0 && result.has_passing) item += L" (推荐)";
+        if (g->candidate_combo) {
+          SendMessageW(g->candidate_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+        }
+      }
+      if (g->candidate_combo) {
+        SendMessageW(g->candidate_combo, CB_SETCURSEL, 0, 0);
+      }
+
+      const auto& best = result.candidates.front().candidate;
+      g->recommended_regex = best.regex;
+      g->recommended_capturing_regex = best.capturing_regex;
+      g->selftest_candidate = best;
+      g->has_selftest_candidate = true;
+      SetWindowTextW(g->rec_regex_edit, utf8_to_wide(best.regex).c_str());
 
       std::string text;
       if (!result.warnings.empty()) {
@@ -872,19 +806,19 @@ void run_generate(HWND hwnd) {
       SetWindowTextW(g->result_edit, utf8_to_wide(text).c_str());
 
       std::wstring st = L"生成完成: 产出 " + std::to_wstring(result.candidates.size()) + L" 条候选";
-      if (result.has_passing) st += L"（智能业务推荐候选已就绪，可一键复制）";
+      if (result.has_passing) st += L"（默认推荐候选已就绪，可在右上角下拉切换并自测）";
       else st += L"（⚠ 未完全通过）";
       set_status(hwnd, st);
     }
 
-    g->has_selftest_candidate = !result.candidates.empty();
-    if (g->has_selftest_candidate) g->selftest_candidate = result.candidates.front().candidate;
-
     g->last_segments = result.candidates.empty()
                           ? std::vector<regex_tool::SegmentRule>{}
                           : result.candidates.front().candidate.segments;
-    rebuild_segment_table(hwnd);
     layout_scroll_content(g->scroll_container);
+
+    if (g->has_selftest_candidate && !get_edit_text(g->selftest_edit).empty()) {
+      run_selftest(hwnd);
+    }
   } catch (const std::exception& e) {
     std::string err_msg = "生成异常: ";
     err_msg += e.what();
@@ -901,13 +835,17 @@ void run_selftest(HWND hwnd) {
     SetWindowTextW(g->selftest_label, L"自测: 请先生成候选正则");
     return;
   }
-  std::string input = wide_to_utf8(get_edit_text(g->selftest_edit));
+  std::string input = regex_tool::trim(wide_to_utf8(get_edit_text(g->selftest_edit)));
   if (input.empty()) {
     SetWindowTextW(g->selftest_label, L"自测: 请输入待判定条码");
     return;
   }
   auto v = regex_tool::verify_example(g->selftest_candidate, input);
+  std::wstring cand_name = utf8_to_wide(g->selftest_candidate.display_name.empty()
+                                        ? g->selftest_candidate.variant
+                                        : g->selftest_candidate.display_name);
   std::wstring msg = v.passed ? L"自测: 通过 ✓" : L"自测: 不通过 ✗";
+  msg += L" [测试候选: " + cand_name + L"]";
   if (!v.passed) {
     if (v.failing_segment != SIZE_MAX) {
       msg += L"（卡在分段 " + std::to_wstring(v.failing_segment + 1) + L"）";
@@ -915,7 +853,7 @@ void run_selftest(HWND hwnd) {
       msg += L"（整串不匹配）";
     }
   } else if (!v.field_captures.empty()) {
-    msg += L" [捕获:";
+    msg += L" [捕获: ";
     for (size_t i = 0; i < v.field_captures.size(); ++i) {
       if (i > 0) msg += L", ";
       msg += utf8_to_wide(v.field_captures[i].first) + L"=" + utf8_to_wide(v.field_captures[i].second);
@@ -1190,7 +1128,6 @@ bool load_project(HWND hwnd, const std::wstring& name, std::wstring& error) {
     add_example_row(hwnd, true);
     SetWindowTextW(g->neg_edits.back(), utf8_to_wide(n_str).c_str());
   }
-  destroy_segment_table(g);
   run_generate(hwnd);
   set_status(hwnd, L"已成功加载项目: " + name);
   return true;
@@ -1215,7 +1152,6 @@ int content_height(const AppState* g) {
     y += static_cast<int>((g->length_boxes.size() + LEN_PER_LINE - 1) / LEN_PER_LINE) * row_h;
   }
 
-  y += static_cast<int>(g->seg_edits.size()) * row_h;                  // segment rule table
   return y + g->scale_dpi(20);
 }
 
@@ -1298,14 +1234,6 @@ void layout_scroll_content(HWND scroll_hwnd) {
     }
     y += static_cast<int>((g->length_boxes.size() + LEN_PER_LINE - 1) / LEN_PER_LINE) * row_h;
   }
-
-  for (size_t i = 0; i < g->seg_edits.size(); ++i) {
-    MoveWindow(g->seg_edits[i], 0, y, edit_w - g->scale_dpi(54), ctrl_h, TRUE);
-    if (i < g->seg_promote_btns.size() && g->seg_promote_btns[i]) {
-      MoveWindow(g->seg_promote_btns[i], edit_w - g->scale_dpi(50), y, g->scale_dpi(48), ctrl_h, TRUE);
-    }
-    y += row_h;
-  }
 }
 
 void layout(HWND hwnd) {
@@ -1354,12 +1282,16 @@ void layout(HWND hwnd) {
   // 4. Right Pane: Structured Recommended Regex + Verification Details + Self-test
   int r_top = g->scale_dpi(12);
 
-  // 4.1 Recommended Regex Section Header & Copy Buttons
-  int btn_w1 = g->scale_dpi(104);
-  int btn_w2 = g->scale_dpi(104);
-  int total_btn_w = btn_w1 + btn_w2 + g->scale_dpi(6);
-  MoveWindow(g->rec_header_label, right_x, r_top, std::max(right_pane_w - total_btn_w - g->scale_dpi(10), g->scale_dpi(100)), g->scale_dpi(22), TRUE);
-  MoveWindow(g->copy_btn, right_x + right_pane_w - total_btn_w, r_top, btn_w1, ctrl_h, TRUE);
+  // 4.1 Candidate Selection Header & Copy Buttons
+  int btn_w1 = g->scale_dpi(78);
+  int btn_w2 = g->scale_dpi(78);
+  int right_btn_w = btn_w1 + btn_w2 + g->scale_dpi(6);
+  int cand_lbl_w = g->scale_dpi(66);
+  int cand_combo_w = std::max(right_pane_w - cand_lbl_w - right_btn_w - g->scale_dpi(12), g->scale_dpi(150));
+
+  MoveWindow(g->rec_header_label, right_x, r_top + g->scale_dpi(3), cand_lbl_w, g->scale_dpi(20), TRUE);
+  MoveWindow(g->candidate_combo, right_x + cand_lbl_w, r_top, cand_combo_w, ctrl_h, TRUE);
+  MoveWindow(g->copy_btn, right_x + right_pane_w - right_btn_w, r_top, btn_w1, ctrl_h, TRUE);
   MoveWindow(g->copy_cap_btn, right_x + right_pane_w - btn_w2, r_top, btn_w2, ctrl_h, TRUE);
 
   // 4.2 Recommended Regex Highlight Box
@@ -1545,11 +1477,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
       set_mode(g, 0);
 
-      // 5. Right Pane Controls (Dedicated Recommended Regex Box + Details Box + Self-test)
-      g->rec_header_label = make_static(hwnd, L"推荐候选正则:", 0, 0, 0, 0, true);
-      g->copy_btn = make_button(hwnd, L"复制推荐正则", IDC_COPY_REGEX, 0, 0, 0, 0);
-      g->copy_cap_btn = make_button(hwnd, L"复制捕获正则", IDC_COPY_CAP_REGEX, 0, 0, 0, 0);
-      g->rec_regex_edit = make_edit(hwnd, IDC_REC_REGEX_EDIT, 0, 0, 0, 0, ES_READONLY, L"（生成后此处将显示高亮推荐正则）");
+      // 5. Right Pane Controls (Dedicated Candidate Selector + Highlight Regex Box + Details Box + Self-test)
+      g->rec_header_label = make_static(hwnd, L"当前候选:", 0, 0, 0, 0, true);
+      g->candidate_combo = make_combo(hwnd, IDC_CANDIDATE_COMBO, 0, 0, 0, 0, false);
+      g->copy_btn = make_button(hwnd, L"复制正则", IDC_COPY_REGEX, 0, 0, 0, 0);
+      g->copy_cap_btn = make_button(hwnd, L"复制捕获", IDC_COPY_CAP_REGEX, 0, 0, 0, 0);
+      g->rec_regex_edit = make_edit(hwnd, IDC_REC_REGEX_EDIT, 0, 0, 0, 0, ES_READONLY, L"（生成后此处将显示高亮候选正则）");
       SendMessageW(g->rec_regex_edit, WM_SETFONT, reinterpret_cast<WPARAM>(g->mono_bold_font), TRUE);
 
       g->result_header_label = make_static(hwnd, L"验证详情与备选候选:", 0, 0, 0, 0, true);
@@ -1740,6 +1673,25 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
       }
 
+      if (id == IDC_CANDIDATE_COMBO && code == CBN_SELCHANGE) {
+        int cur = static_cast<int>(SendMessageW(g->candidate_combo, CB_GETCURSEL, 0, 0));
+        if (cur >= 0 && cur < static_cast<int>(g->last_candidates.size())) {
+          g->selected_candidate_index = cur;
+          const auto& cand = g->last_candidates[cur].candidate;
+          g->recommended_regex = cand.regex;
+          g->recommended_capturing_regex = cand.capturing_regex;
+          g->selftest_candidate = cand;
+          g->has_selftest_candidate = true;
+          SetWindowTextW(g->rec_regex_edit, utf8_to_wide(cand.regex).c_str());
+          std::string name = cand.display_name.empty() ? cand.variant : cand.display_name;
+          set_status(hwnd, L"当前已切换测试候选: " + utf8_to_wide(name));
+          if (!get_edit_text(g->selftest_edit).empty()) {
+            run_selftest(hwnd);
+          }
+        }
+        return 0;
+      }
+
       if (code != BN_CLICKED) return 0;
 
       if (id == IDC_NEW) {
@@ -1758,7 +1710,6 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         rebuild_length_boxes(hwnd);
         clear_example_rows(g, false);
         clear_example_rows(g, true);
-        destroy_segment_table(g);
         add_example_row(hwnd, false);
         layout_scroll_content(g->scroll_container);
         set_status(hwnd, L"已新建空白项目");

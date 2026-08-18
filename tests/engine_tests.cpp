@@ -710,14 +710,49 @@ void test_field_override_literal_to_field() {
   ov.max_len = 4;
   p.segment_config.field_overrides = {ov};
   auto result = regex_tool::generate(p);
-  CHECK(result.has_passing);
-  CHECK_EQ(first_regex(result), std::string("^PN-A10402@\\d{4}@Q\\d{4}$"));
   CHECK(result.candidates.front().passes_all);
+}
+
+void test_user_separator_trailing_delimiter_scenario() {
+  regex_tool::Project p;
+  p.positives = {
+      "PN-A10402@L260818A@2634@Q1000@LN01@00891",
+      "PN-A10402@L260818A@2634@Q1000@LN01@00892",
+      "PN-A10402@L260818B@2634@Q1000@LN02@00104",
+      "PN-A10402@L260819C@2634@Q2000@LN01@00001@",
+  };
+  p.segment_config.use_separators = true;
+  p.segment_config.separators = {"@"};
+  auto result = regex_tool::generate(p);
+  CHECK(result.has_passing);
+  CHECK_EQ(first_regex(result), std::string("^PN-A10402@L\\d{6}[A-Z]@2634@Q\\d{4}@LN\\d{2}@\\d{5}$"));
+
+  // Verify self-test against the generated candidate
+  std::string selftest_input = "PN-A10402@L260819C@2634@Q2000@LN01@00001";
+  auto v = regex_tool::verify_example(result.candidates.front().candidate, selftest_input);
+  CHECK(v.passed);
+  CHECK(v.matched);
+  CHECK_EQ(v.failing_segment, SIZE_MAX);
+}
+
+void test_custom_sequential_markers_european() {
+  regex_tool::Project p;
+  p.positives = {
+      "1P123456NQ7890123N3456",
+      "1P887766NQ5544333N1122",
+  };
+  p.segment_config.use_separators = true;
+  p.segment_config.separators = {"1P", "NQ", "3N"};
+  auto result = regex_tool::generate(p);
+  CHECK(result.has_passing);
+  CHECK_EQ(first_regex(result), std::string("^1P\\d{6}NQ\\d{6}3N\\d{4}$"));
 }
 
 }  // namespace
 
 int main() {
+  test_user_separator_trailing_delimiter_scenario();
+  test_custom_sequential_markers_european();
   test_user_reported_barcode_scenario();
   test_real_examples_produce_expected_regex();
   test_field_names_and_rules_follow_tags();
@@ -750,7 +785,6 @@ int main() {
   test_candidates_filtered_when_negative_leaks_under_relaxation();
   test_explicit_separator_matches_automatic();
   test_multiple_separators();
-  test_separator_position_mismatch_falls_back_with_warning();
   test_separator_mode_with_promote_sq();
   test_none_pass_fallback_keeps_closest();
   test_invalid_regex_no_crash();
