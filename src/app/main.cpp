@@ -915,18 +915,41 @@ std::wstring project_name(const AppState* g) {
   return n;
 }
 
-void populate_projects(AppState* g) {
-  if (!g || !g->project_combo) return;
-  SendMessageW(g->project_combo, CB_RESETCONTENT, 0, 0);
+std::wstring projects_dir() {
+  std::wstring dir = exe_dir() + L"\\projects";
+  CreateDirectoryW(dir.c_str(), nullptr);
+  return dir;
+}
 
-  std::vector<std::wstring> dirs = { exe_dir() };
+std::vector<std::wstring> get_project_search_dirs() {
+  std::vector<std::wstring> dirs;
+  std::wstring p1 = projects_dir();
+  dirs.push_back(p1);
+
   wchar_t cwd_buf[MAX_PATH];
+  if (GetCurrentDirectoryW(MAX_PATH, cwd_buf)) {
+    std::wstring cwd_proj = std::wstring(cwd_buf) + L"\\projects";
+    CreateDirectoryW(cwd_proj.c_str(), nullptr);
+    if (_wcsicmp(cwd_proj.c_str(), p1.c_str()) != 0) {
+      dirs.push_back(cwd_proj);
+    }
+  }
+
+  // Fallback for legacy files beside exe or in CWD
+  dirs.push_back(exe_dir());
   if (GetCurrentDirectoryW(MAX_PATH, cwd_buf)) {
     if (_wcsicmp(dirs[0].c_str(), cwd_buf) != 0) {
       dirs.push_back(cwd_buf);
     }
   }
+  return dirs;
+}
 
+void populate_projects(AppState* g) {
+  if (!g || !g->project_combo) return;
+  SendMessageW(g->project_combo, CB_RESETCONTENT, 0, 0);
+
+  auto dirs = get_project_search_dirs();
   std::vector<std::wstring> added;
   for (const auto& dir : dirs) {
     WIN32_FIND_DATAW fd;
@@ -983,14 +1006,19 @@ bool save_project(HWND hwnd) {
   auto g = get_app_state(hwnd);
   if (!g) return false;
   std::wstring name = project_name(g);
-  std::wstring path = exe_dir() + L"\\" + name + L".rgx";
+  std::wstring path = projects_dir() + L"\\" + name + L".rgx";
   std::ofstream f(path, std::ios::binary);
+  if (!f) {
+    CreateDirectoryW(L"projects", nullptr);
+    path = L"projects\\" + name + L".rgx";
+    f.open(path, std::ios::binary);
+  }
   if (!f) return false;
   f << serialize_project(g);
   if (f.good()) {
     populate_projects(g);
     SetWindowTextW(g->project_combo, name.c_str());
-    set_status(hwnd, L"已保存项目: " + name + L".rgx");
+    set_status(hwnd, L"已保存项目: projects\\" + name + L".rgx");
     return true;
   }
   return false;
@@ -999,14 +1027,22 @@ bool save_project(HWND hwnd) {
 bool load_project(HWND hwnd, const std::wstring& name, std::wstring& error) {
   auto g = get_app_state(hwnd);
   if (!g) return false;
-  std::wstring path = exe_dir() + L"\\" + name + L".rgx";
-  std::ifstream f(path, std::ios::binary);
-  if (!f) {
-    path = name + L".rgx";
+
+  std::vector<std::wstring> search_paths = {
+    projects_dir() + L"\\" + name + L".rgx",
+    L"projects\\" + name + L".rgx",
+    exe_dir() + L"\\" + name + L".rgx",
+    name + L".rgx"
+  };
+
+  std::ifstream f;
+  for (const auto& path : search_paths) {
     f.open(path, std::ios::binary);
+    if (f.is_open()) break;
   }
-  if (!f) {
-    error = L"无法打开项目文件: " + name + L".rgx";
+
+  if (!f.is_open()) {
+    error = L"无法打开项目文件: projects\\" + name + L".rgx";
     return false;
   }
   std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
