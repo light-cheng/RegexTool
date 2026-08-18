@@ -443,19 +443,20 @@ LRESULT CALLBACK batch_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                              reinterpret_cast<LPCREATESTRUCTW>(lParam)->lpCreateParams));
       RECT rc;
       GetClientRect(hwnd, &rc);
-      HWND edit = CreateWindowExW(0, L"EDIT", L"",
-                                  CHILD_STYLE | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                                  12, 12, rc.right - 24, rc.bottom - 60, hwnd,
+      HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                  WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN,
+                                  12, 12, rc.right - 24, rc.bottom - 56, hwnd,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(BATCH_EDIT)),
                                   GetModuleHandleW(nullptr), nullptr);
       HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
       SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-      HWND ok = CreateWindowExW(0, L"BUTTON", L"确定", CHILD_STYLE | BS_PUSHBUTTON,
-                                rc.right - 190, rc.bottom - 40, 80, 28, hwnd,
+
+      HWND ok = CreateWindowExW(0, L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                rc.right - 180, rc.bottom - 38, 76, 28, hwnd,
                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(BATCH_OK)),
                                 GetModuleHandleW(nullptr), nullptr);
-      HWND cancel = CreateWindowExW(0, L"BUTTON", L"取消", CHILD_STYLE | BS_PUSHBUTTON,
-                                    rc.right - 96, rc.bottom - 40, 80, 28, hwnd,
+      HWND cancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                    rc.right - 92, rc.bottom - 38, 76, 28, hwnd,
                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(BATCH_CANCEL)),
                                     GetModuleHandleW(nullptr), nullptr);
       SendMessageW(ok, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
@@ -470,12 +471,19 @@ LRESULT CALLBACK batch_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (id == BATCH_OK && ctx) {
           HWND edit = GetDlgItem(hwnd, BATCH_EDIT);
           int len = GetWindowTextLengthW(edit);
-          ctx->text.assign(static_cast<size_t>(len), L'\0');
-          if (len > 0) GetWindowTextW(edit, ctx->text.data(), len + 1);
+          if (len > 0) {
+            std::vector<wchar_t> buf(static_cast<size_t>(len) + 1, L'\0');
+            GetWindowTextW(edit, buf.data(), len + 1);
+            ctx->text = buf.data();
+          }
         }
         DestroyWindow(hwnd);
         return 0;
       }
+      return 0;
+    }
+    case WM_CLOSE: {
+      DestroyWindow(hwnd);
       return 0;
     }
   }
@@ -487,24 +495,36 @@ std::vector<std::string> split_lines(const std::wstring& text) {
   std::wstring cur;
   for (wchar_t c : text) {
     if (c == L'\n') {
-      if (!cur.empty()) lines.push_back(wide_to_utf8(cur));
+      std::string t = regex_tool::trim(wide_to_utf8(cur));
+      if (!t.empty()) lines.push_back(t);
       cur.clear();
     } else if (c != L'\r') {
       cur += c;
     }
   }
-  if (!cur.empty()) lines.push_back(wide_to_utf8(cur));
+  std::string t = regex_tool::trim(wide_to_utf8(cur));
+  if (!t.empty()) lines.push_back(t);
   return lines;
 }
 
 void run_batch_dialog(HWND owner, bool negative) {
   BatchCtx ctx;
+  RECT rc_owner;
+  GetWindowRect(owner, &rc_owner);
+  int dlg_w = 520, dlg_h = 360;
+  int dlg_x = rc_owner.left + (rc_owner.right - rc_owner.left - dlg_w) / 2;
+  int dlg_y = rc_owner.top + (rc_owner.bottom - rc_owner.top - dlg_h) / 2;
+
   HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"RegexToolBatch",
                              negative ? L"批量粘贴反例（每行一条）" : L"批量粘贴正例（每行一条）",
-                             WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 520, 340,
+                             WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                             dlg_x, dlg_y, dlg_w, dlg_h,
                              owner, nullptr, GetModuleHandleW(nullptr), &ctx);
   if (!dlg) return;
+
+  ShowWindow(dlg, SW_SHOW);
+  UpdateWindow(dlg);
+
   HWND prev_focus = GetFocus();
   EnableWindow(owner, FALSE);
   MSG msg;
@@ -518,13 +538,17 @@ void run_batch_dialog(HWND owner, bool negative) {
     }
   }
   EnableWindow(owner, TRUE);
+  SetForegroundWindow(owner);
   SetFocus(prev_focus);
   if (quit) PostQuitMessage(0);
 
   auto g = reinterpret_cast<AppState*>(GetWindowLongPtrW(owner, GWLP_USERDATA));
   if (!g) return;
 
-  for (const std::string& line : split_lines(ctx.text)) {
+  auto lines = split_lines(ctx.text);
+  if (lines.empty()) return;
+
+  for (const std::string& line : lines) {
     if (line.empty()) continue;
     if (negative) {
       add_example_row(owner, true);
@@ -1449,7 +1473,8 @@ LRESULT CALLBACK scroll_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_COMMAND: {
       // Forward child commands to parent main window
-      return SendMessageW(g_main_hwnd, WM_COMMAND, wParam, lParam);
+      HWND parent = GetParent(hwnd);
+      return SendMessageW(parent ? parent : g_main_hwnd, WM_COMMAND, wParam, lParam);
     }
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
