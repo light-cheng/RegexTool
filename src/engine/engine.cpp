@@ -19,6 +19,21 @@ std::string escape_literal(const std::string& s) {
         out += '\\';
         out += c;
         break;
+      case '\x1D':
+        out += "\\x1D";
+        break;
+      case '\x1E':
+        out += "\\x1E";
+        break;
+      case '\x04':
+        out += "\\x04";
+        break;
+      case '\x1F':
+        out += "\\x1F";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
       default:
         out += c;
     }
@@ -82,8 +97,18 @@ std::string tag_from_literal(const std::string& literal) {
   return tag;
 }
 
+std::vector<SegmentRule> normalize_segments(std::vector<SegmentRule> segments);
+
 // Classical positional segmentation (strictly non-constant positions become fields).
 std::vector<SegmentRule> segment_positives_exact(const std::vector<std::string>& positives) {
+  if (positives.empty()) return {};
+  if (positives.size() == 1) {
+    SegmentRule seg;
+    seg.is_literal = true;
+    seg.literal = positives[0];
+    return {seg};
+  }
+
   std::size_t min_len = SIZE_MAX, max_len = 0;
   for (const auto& s : positives) {
     min_len = std::min(min_len, s.size());
@@ -91,14 +116,76 @@ std::vector<SegmentRule> segment_positives_exact(const std::vector<std::string>&
   }
   if (min_len == SIZE_MAX) min_len = 0;
 
+  if (min_len != max_len) {
+    // Variable length: constant parts can only be common prefix and common suffix
+    std::size_t prefix_len = 0;
+    while (prefix_len < min_len) {
+      char c = positives[0][prefix_len];
+      bool match = true;
+      for (const auto& s : positives) {
+        if (s[prefix_len] != c) { match = false; break; }
+      }
+      if (!match) break;
+      ++prefix_len;
+    }
+
+    std::size_t suffix_len = 0;
+    while (suffix_len < min_len - prefix_len) {
+      char c = positives[0][positives[0].size() - 1 - suffix_len];
+      bool match = true;
+      for (const auto& s : positives) {
+        if (s[s.size() - 1 - suffix_len] != c) { match = false; break; }
+      }
+      if (!match) break;
+      ++suffix_len;
+    }
+
+    std::vector<SegmentRule> segs;
+    if (prefix_len > 0) {
+      SegmentRule pseg;
+      pseg.is_literal = true;
+      pseg.literal = positives[0].substr(0, prefix_len);
+      segs.push_back(std::move(pseg));
+    }
+
+    std::set<char> mid_chars;
+    std::size_t min_mid = SIZE_MAX, max_mid = 0;
+    for (const auto& s : positives) {
+      std::size_t mid_size = (s.size() >= prefix_len + suffix_len) ? s.size() - prefix_len - suffix_len : 0;
+      min_mid = std::min(min_mid, mid_size);
+      max_mid = std::max(max_mid, mid_size);
+      for (std::size_t k = prefix_len; k < s.size() - suffix_len; ++k) {
+        mid_chars.insert(s[k]);
+      }
+    }
+
+    if (max_mid > 0) {
+      SegmentRule fseg;
+      fseg.is_literal = false;
+      std::string tag = (!segs.empty() && segs.back().is_literal) ? tag_from_literal(segs.back().literal) : "";
+      fseg.field.name = tag.empty() ? "Field1" : tag;
+      fseg.field.charset = charset_for(mid_chars);
+      fseg.field.min_len = min_mid;
+      fseg.field.max_len = max_mid;
+      segs.push_back(std::move(fseg));
+    }
+
+    if (suffix_len > 0) {
+      SegmentRule sseg;
+      sseg.is_literal = true;
+      sseg.literal = positives[0].substr(positives[0].size() - suffix_len);
+      segs.push_back(std::move(sseg));
+    }
+
+    return segs;
+  }
+
   std::vector<bool> is_const(max_len);
   for (std::size_t p = 0; p < max_len; ++p) {
-    bool same = p < min_len;
-    if (same) {
-      char c = positives[0][p];
-      for (const auto& s : positives) {
-        if (s[p] != c) { same = false; break; }
-      }
+    bool same = true;
+    char c = positives[0][p];
+    for (const auto& s : positives) {
+      if (s[p] != c) { same = false; break; }
     }
     is_const[p] = same;
   }
@@ -161,20 +248,63 @@ std::vector<SegmentRule> segment_positives_exact(const std::vector<std::string>&
   return segments;
 }
 
-enum CharClassCategory {
-  CAT_CONST,
-  CAT_DIGIT,
-  CAT_UPPER,
-  CAT_LOWER,
-  CAT_ALNUM,
-  CAT_OTHER
+enum LexType {
+  LEX_ALPHA,
+  LEX_DIGIT,
+  LEX_PUNCT,
+  LEX_OTHER
 };
+
+struct LexChunk {
+  LexType type;
+  std::string text;
+};
+
+static std::vector<LexChunk> lex_split(const std::string& s) {
+  std::vector<LexChunk> chunks;
+  if (s.empty()) return chunks;
+  std::size_t i = 0;
+  while (i < s.size()) {
+    unsigned char u = static_cast<unsigned char>(s[i]);
+    LexType t = LEX_OTHER;
+    if (std::isalpha(u)) t = LEX_ALPHA;
+    else if (std::isdigit(u)) t = LEX_DIGIT;
+    else if (std::ispunct(u) || u == '@' || u == '|' || u == '_' || u == '-' || u == ':' || u == '/' || u == ';' || u == '.') t = LEX_PUNCT;
+
+    std::size_t j = i + 1;
+    while (j < s.size()) {
+      unsigned char uj = static_cast<unsigned char>(s[j]);
+      LexType tj = LEX_OTHER;
+      if (std::isalpha(uj)) tj = LEX_ALPHA;
+      else if (std::isdigit(uj)) tj = LEX_DIGIT;
+      else if (std::ispunct(uj) || uj == '@' || uj == '|' || uj == '_' || uj == '-' || uj == ':' || uj == '/' || uj == ';' || uj == '.') tj = LEX_PUNCT;
+
+      if (tj != t) break;
+      ++j;
+    }
+    chunks.push_back({t, s.substr(i, j - i)});
+    i = j;
+  }
+  return chunks;
+}
 
 // Smart Semantic Tokenization (Anti-overfitting for industrial barcodes).
 std::vector<SegmentRule> segment_positives_semantic(const std::vector<std::string>& positives) {
   if (positives.empty()) return {};
   if (positives.size() == 1) {
     return segment_positives_exact(positives);
+  }
+
+  // 1. Check if all samples are completely identical
+  bool all_identical = true;
+  for (std::size_t i = 1; i < positives.size(); ++i) {
+    if (positives[i] != positives[0]) { all_identical = false; break; }
+  }
+  if (all_identical) {
+    SegmentRule seg;
+    seg.is_literal = true;
+    seg.literal = positives[0];
+    return {seg};
   }
 
   std::size_t min_len = SIZE_MAX, max_len = 0;
@@ -184,9 +314,100 @@ std::vector<SegmentRule> segment_positives_semantic(const std::vector<std::strin
   }
   if (min_len == SIZE_MAX) min_len = 0;
 
-  // Handle variable-length inputs with shared constant prefix
+  // 2. Homogeneity: Check if all samples are pure digits
+  bool all_pure_digits = true;
+  for (const auto& s : positives) {
+    for (char c : s) {
+      if (!std::isdigit(static_cast<unsigned char>(c))) {
+        all_pure_digits = false;
+        break;
+      }
+    }
+    if (!all_pure_digits) break;
+  }
+  if (all_pure_digits) {
+    SegmentRule seg;
+    seg.is_literal = false;
+    seg.field.name = "Field1";
+    seg.field.charset = "\\d";
+    seg.field.min_len = min_len;
+    seg.field.max_len = max_len;
+    return {seg};
+  }
+
+  // 3. Variable-length inputs (min_len != max_len)
   if (min_len != max_len) {
-    // Check common constant prefix
+    // 3a. Try lexical chunk alignment
+    std::vector<std::vector<LexChunk>> all_tokens;
+    all_tokens.reserve(positives.size());
+    for (const auto& s : positives) {
+      all_tokens.push_back(lex_split(s));
+    }
+
+    bool same_token_count = true;
+    for (std::size_t i = 1; i < all_tokens.size(); ++i) {
+      if (all_tokens[i].size() != all_tokens[0].size()) {
+        same_token_count = false;
+        break;
+      }
+    }
+
+    if (same_token_count && !all_tokens[0].empty()) {
+      std::size_t ntokens = all_tokens[0].size();
+      bool same_token_types = true;
+      for (std::size_t j = 0; j < ntokens; ++j) {
+        for (std::size_t i = 1; i < all_tokens.size(); ++i) {
+          if (all_tokens[i][j].type != all_tokens[0][j].type) {
+            same_token_types = false;
+            break;
+          }
+        }
+        if (!same_token_types) break;
+      }
+
+      if (same_token_types) {
+        std::vector<SegmentRule> segments;
+        int field_no = 0;
+        for (std::size_t j = 0; j < ntokens; ++j) {
+          bool const_token = true;
+          const std::string& first_text = all_tokens[0][j].text;
+          for (std::size_t i = 1; i < all_tokens.size(); ++i) {
+            if (all_tokens[i][j].text != first_text) {
+              const_token = false;
+              break;
+            }
+          }
+
+          if (const_token) {
+            SegmentRule seg;
+            seg.is_literal = true;
+            seg.literal = first_text;
+            segments.push_back(std::move(seg));
+          } else {
+            std::set<char> chars;
+            std::size_t min_f = SIZE_MAX, max_f = 0;
+            for (std::size_t i = 0; i < all_tokens.size(); ++i) {
+              const auto& t = all_tokens[i][j].text;
+              min_f = std::min(min_f, t.size());
+              max_f = std::max(max_f, t.size());
+              for (char c : t) chars.insert(c);
+            }
+            SegmentRule seg;
+            seg.is_literal = false;
+            std::string tag = (!segments.empty() && segments.back().is_literal)
+                                  ? tag_from_literal(segments.back().literal) : "";
+            seg.field.name = tag.empty() ? "Field" + std::to_string(++field_no) : tag;
+            seg.field.charset = charset_for(chars);
+            seg.field.min_len = min_f;
+            seg.field.max_len = max_f;
+            segments.push_back(std::move(seg));
+          }
+        }
+        return normalize_segments(std::move(segments));
+      }
+    }
+
+    // 3b. Variable-length fallback: common constant prefix + field + common constant suffix
     std::size_t prefix_len = 0;
     while (prefix_len < min_len) {
       char c = positives[0][prefix_len];
@@ -197,37 +418,69 @@ std::vector<SegmentRule> segment_positives_semantic(const std::vector<std::strin
       if (!match) break;
       ++prefix_len;
     }
+
+    std::size_t suffix_len = 0;
+    while (suffix_len < min_len - prefix_len) {
+      char c = positives[0][positives[0].size() - 1 - suffix_len];
+      bool match = true;
+      for (const auto& s : positives) {
+        if (s[s.size() - 1 - suffix_len] != c) { match = false; break; }
+      }
+      if (!match) break;
+      ++suffix_len;
+    }
+
+    std::vector<SegmentRule> segs;
     if (prefix_len > 0) {
-      std::vector<SegmentRule> segs;
       SegmentRule pseg;
       pseg.is_literal = true;
       pseg.literal = positives[0].substr(0, prefix_len);
       segs.push_back(std::move(pseg));
+    }
 
-      std::set<char> var_chars;
-      std::size_t min_rem = SIZE_MAX, max_rem = 0;
-      for (const auto& s : positives) {
-        std::size_t rem = (s.size() > prefix_len) ? s.size() - prefix_len : 0;
-        min_rem = std::min(min_rem, rem);
-        max_rem = std::max(max_rem, rem);
-        for (std::size_t k = prefix_len; k < s.size(); ++k) {
-          var_chars.insert(s[k]);
-        }
+    std::set<char> mid_chars;
+    std::size_t min_mid = SIZE_MAX, max_mid = 0;
+    for (const auto& s : positives) {
+      std::size_t mid_size = (s.size() >= prefix_len + suffix_len) ? s.size() - prefix_len - suffix_len : 0;
+      min_mid = std::min(min_mid, mid_size);
+      max_mid = std::max(max_mid, mid_size);
+      for (std::size_t k = prefix_len; k < s.size() - suffix_len; ++k) {
+        mid_chars.insert(s[k]);
       }
+    }
+
+    if (max_mid > 0) {
       SegmentRule fseg;
       fseg.is_literal = false;
-      std::string tag = tag_from_literal(segs.back().literal);
+      std::string tag = (!segs.empty() && segs.back().is_literal)
+                            ? tag_from_literal(segs.back().literal) : "";
       fseg.field.name = tag.empty() ? "Field1" : tag;
-      fseg.field.charset = charset_for(var_chars);
-      fseg.field.min_len = min_rem;
-      fseg.field.max_len = max_rem;
+      fseg.field.charset = charset_for(mid_chars);
+      fseg.field.min_len = min_mid;
+      fseg.field.max_len = max_mid;
       segs.push_back(std::move(fseg));
-      return segs;
     }
-    return segment_positives_exact(positives);
+
+    if (suffix_len > 0) {
+      SegmentRule sseg;
+      sseg.is_literal = true;
+      sseg.literal = positives[0].substr(positives[0].size() - suffix_len);
+      segs.push_back(std::move(sseg));
+    }
+
+    return normalize_segments(std::move(segs));
   }
 
-  // Same-length inputs
+  // 4. Same-length inputs (min_len == max_len)
+  enum CharClassCategory {
+    CAT_CONST,
+    CAT_DIGIT,
+    CAT_UPPER,
+    CAT_LOWER,
+    CAT_ALNUM,
+    CAT_OTHER
+  };
+
   std::vector<CharClassCategory> cats(max_len, CAT_OTHER);
   std::vector<bool> is_const(max_len, false);
 
@@ -276,15 +529,12 @@ std::vector<SegmentRule> segment_positives_semantic(const std::vector<std::strin
 
       std::string lit = positives[0].substr(p, q - p);
 
-      // Check if this constant run ends with digits that are part of a variable numeric run
-      // BUT if the constant run has a letter after digits (like 3N or 1P), it's a fixed tag marker
       if (q < max_len && cats[q] == CAT_DIGIT) {
         std::size_t digit_start = lit.size();
         while (digit_start > 0 && std::isdigit(static_cast<unsigned char>(lit[digit_start - 1]))) {
           --digit_start;
         }
         if (digit_start < lit.size()) {
-          // Keep the non-digit prefix as literal (if any)
           if (digit_start > 0) {
             SegmentRule seg;
             seg.is_literal = true;
@@ -292,11 +542,9 @@ std::vector<SegmentRule> segment_positives_semantic(const std::vector<std::strin
             segments.push_back(std::move(seg));
           }
 
-          // The trailing or full constant digits merge with the variable digits
           std::size_t num_start = p + digit_start;
           std::size_t num_end = q;
           while (num_end < max_len && (cats[num_end] == CAT_DIGIT || (is_const[num_end] && std::isdigit(static_cast<unsigned char>(positives[0][num_end]))))) {
-            // Stop if followed by a constant letter (e.g. 3N)
             if (is_const[num_end] && num_end + 1 < max_len && is_const[num_end + 1] && std::isalpha(static_cast<unsigned char>(positives[0][num_end + 1]))) {
               break;
             }
@@ -325,7 +573,6 @@ std::vector<SegmentRule> segment_positives_semantic(const std::vector<std::strin
     } else if (cats[p] == CAT_DIGIT) {
       std::size_t q = p;
       while (q < max_len && (cats[q] == CAT_DIGIT || (is_const[q] && std::isdigit(static_cast<unsigned char>(positives[0][q]))))) {
-        // If constant digit is part of a constant tag (e.g. 3N), stop before it
         if (is_const[q] && q + 1 < max_len && is_const[q + 1] && std::isalpha(static_cast<unsigned char>(positives[0][q + 1]))) {
           break;
         }
@@ -413,6 +660,22 @@ std::vector<SegmentRule> segment_by_lengths(const std::vector<std::string>& posi
   return segments;
 }
 
+static std::string resolve_sep_token(const std::string& raw, const std::vector<std::string>& positives) {
+  std::string t = trim(raw);
+  if (t == "GS" || t == "<GS>" || t == "\\x1d" || t == "\\x1D") {
+    for (const auto& s : positives) {
+      if (s.find('\x1d') != std::string::npos) return "\x1d";
+    }
+  }
+  if (t == "RS" || t == "<RS>" || t == "\\x1e" || t == "\\x1E") {
+    for (const auto& s : positives) {
+      if (s.find('\x1e') != std::string::npos) return "\x1e";
+    }
+  }
+  if (t == "\\t") return "\t";
+  return t;
+}
+
 std::vector<SegmentRule> segment_by_separators(const std::vector<std::string>& positives,
                                                const std::vector<std::string>& separators,
                                                bool semantic,
@@ -421,7 +684,7 @@ std::vector<SegmentRule> segment_by_separators(const std::vector<std::string>& p
 
   std::vector<std::string> seps;
   for (const auto& s : separators) {
-    std::string t = trim(s);
+    std::string t = resolve_sep_token(s, positives);
     if (!t.empty()) seps.push_back(t);
   }
   if (seps.empty()) return {};
@@ -723,6 +986,21 @@ std::string widen_charset(const std::string& cs) {
 ExampleVerdict walk_verify(const Candidate& candidate, const std::string& example) {
   ExampleVerdict verdict;
   verdict.example = example;
+  verdict.failing_segment = SIZE_MAX;
+
+  std::string target_example = example;
+  if (!candidate.segments.empty() && !candidate.segments[0].is_literal &&
+      example.size() >= 3 && example[0] == ']' &&
+      std::isalnum(static_cast<unsigned char>(example[1])) &&
+      std::isalnum(static_cast<unsigned char>(example[2]))) {
+    target_example = example.substr(3);
+  } else if (!candidate.segments.empty() && candidate.segments[0].is_literal &&
+             candidate.segments[0].literal.size() < 3 && example.size() >= 3 &&
+             example[0] == ']' &&
+             std::isalnum(static_cast<unsigned char>(example[1])) &&
+             std::isalnum(static_cast<unsigned char>(example[2]))) {
+    target_example = example.substr(3);
+  }
 
   std::string cap_re_str = candidate.capturing_regex.empty()
                                ? compose_capturing_regex(candidate.segments)
@@ -737,7 +1015,7 @@ ExampleVerdict walk_verify(const Candidate& candidate, const std::string& exampl
 
   if (cap_valid) {
     std::smatch match;
-    if (std::regex_match(example, match, cap_re)) {
+    if (std::regex_match(target_example, match, cap_re)) {
       verdict.matched = true;
       verdict.passed = true;
       verdict.failing_segment = SIZE_MAX;
@@ -757,7 +1035,7 @@ ExampleVerdict walk_verify(const Candidate& candidate, const std::string& exampl
   std::regex re;
   try {
     re.assign(candidate.regex);
-    if (std::regex_match(example, re)) {
+    if (std::regex_match(target_example, re)) {
       verdict.matched = true;
       verdict.passed = true;
       verdict.failing_segment = SIZE_MAX;
@@ -773,15 +1051,15 @@ ExampleVerdict walk_verify(const Candidate& candidate, const std::string& exampl
   for (std::size_t i = 0; i < candidate.segments.size(); ++i) {
     const auto& seg = candidate.segments[i];
     if (seg.is_literal) {
-      if (example.compare(pos, seg.literal.size(), seg.literal) != 0) {
+      if (target_example.compare(pos, seg.literal.size(), seg.literal) != 0) {
         first_fail = i;
         break;
       }
       pos += seg.literal.size();
     } else {
       std::size_t run = 0;
-      while (run < seg.field.max_len && pos + run < example.size() &&
-             charset_matches(seg.field.charset, example[pos + run])) {
+      while (run < seg.field.max_len && pos + run < target_example.size() &&
+             charset_matches(seg.field.charset, target_example[pos + run])) {
         ++run;
       }
       if (run < seg.field.min_len) {
@@ -851,6 +1129,87 @@ std::string trim(const std::string& s) {
   return s.substr(b, e - b);
 }
 
+std::string normalize_control_chars(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  std::size_t i = 0;
+  while (i < s.size()) {
+    // Check \x1D, \x1E, \x04, \x1F
+    if (i + 3 < s.size() && s[i] == '\\' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+      char h1 = s[i + 2];
+      char h2 = s[i + 3];
+      if (h1 == '1' && (h2 == 'd' || h2 == 'D')) {
+        out += '\x1D';
+        i += 4;
+        continue;
+      }
+      if (h1 == '1' && (h2 == 'e' || h2 == 'E')) {
+        out += '\x1E';
+        i += 4;
+        continue;
+      }
+      if (h1 == '0' && h2 == '4') {
+        out += '\x04';
+        i += 4;
+        continue;
+      }
+      if (h1 == '1' && (h2 == 'f' || h2 == 'F')) {
+        out += '\x1F';
+        i += 4;
+        continue;
+      }
+    }
+    // Check <GS>, [GS], <RS>, [RS], <US>, [US]
+    if (i + 3 < s.size() && ((s[i] == '<' && s[i + 3] == '>') || (s[i] == '[' && s[i + 3] == ']'))) {
+      char c1 = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i + 1])));
+      char c2 = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i + 2])));
+      if (c1 == 'G' && c2 == 'S') {
+        out += '\x1D';
+        i += 4;
+        continue;
+      }
+      if (c1 == 'R' && c2 == 'S') {
+        out += '\x1E';
+        i += 4;
+        continue;
+      }
+      if (c1 == 'U' && c2 == 'S') {
+        out += '\x1F';
+        i += 4;
+        continue;
+      }
+    }
+    // Check <EOT> or [EOT]
+    if (i + 4 < s.size() && ((s[i] == '<' && s[i + 4] == '>') || (s[i] == '[' && s[i + 4] == ']'))) {
+      char c1 = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i + 1])));
+      char c2 = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i + 2])));
+      char c3 = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i + 3])));
+      if (c1 == 'E' && c2 == 'O' && c3 == 'T') {
+        out += '\x04';
+        i += 5;
+        continue;
+      }
+    }
+    out += s[i];
+    ++i;
+  }
+  return out;
+}
+
+std::string visualize_control_chars(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    switch (c) {
+      case '\x1D': out += "[GS]"; break;
+      case '\x1E': out += "[RS]"; break;
+      case '\x04': out += "[EOT]"; break;
+      case '\x1F': out += "[US]"; break;
+      default: out += c; break;
+    }
+  }
+  return out;
+}
+
 bool charset_matches(const std::string& frag, char c) {
   unsigned char u = static_cast<unsigned char>(c);
   if (frag == "\\d" || frag == "[0-9]") return std::isdigit(u) != 0;
@@ -892,7 +1251,39 @@ bool charset_matches(const std::string& frag, char c) {
 }
 
 ExampleVerdict verify_example(const Candidate& candidate, const std::string& example) {
-  return walk_verify(candidate, example);
+  std::string norm = normalize_control_chars(trim(example));
+  auto v = walk_verify(candidate, norm);
+  v.example = example;
+  return v;
+}
+
+std::string get_business_field_description(const std::string& field_name) {
+  if (field_name == "1P" || field_name == "P") return "PartNumber";
+  if (field_name == "Q" || field_name == "30Q") return "Quantity";
+  if (field_name == "S") return "SerialNumber";
+  if (field_name == "1S") return "SupplierSerialNumber";
+  if (field_name == "3S") return "BoxSerialNumber";
+  if (field_name == "4S") return "PalletSerialNumber";
+  if (field_name == "1T") return "TraceabilityLot";
+  if (field_name == "T") return "LotNumber";
+  if (field_name == "V") return "VendorCode";
+  if (field_name == "17V") return "ManufacturerCode";
+  if (field_name == "D") return "DateCode";
+  if (field_name == "1J") return "PackageID";
+  if (field_name == "3J") return "InnerPackageID";
+  if (field_name == "4J") return "MasterPalletID";
+  if (field_name == "5J") return "MixedPackageID";
+  if (field_name == "6J") return "SmallLoadCarrierID";
+  if (field_name == "01" || field_name == "(01)") return "GTIN";
+  if (field_name == "02" || field_name == "(02)") return "ContentGTIN";
+  if (field_name == "10" || field_name == "(10)") return "BatchLot";
+  if (field_name == "11" || field_name == "(11)") return "ProdDate";
+  if (field_name == "17" || field_name == "(17)") return "ExpDate";
+  if (field_name == "21" || field_name == "(21)") return "SerialNumber";
+  if (field_name == "30" || field_name == "(30)") return "Count";
+  if (field_name == "30P") return "PartRevision";
+  if (field_name == "K" || field_name == "1K") return "PurchaseOrder";
+  return field_name;
 }
 
 std::vector<std::string> promotable_tags(const std::string& literal) {
@@ -917,12 +1308,12 @@ std::vector<std::string> detect_separators(const std::vector<std::string>& posit
 
   std::vector<std::string> cleaned;
   for (const auto& s : positives) {
-    std::string t = trim(s);
+    std::string t = normalize_control_chars(trim(s));
     if (!t.empty()) cleaned.push_back(t);
   }
   if (cleaned.empty()) return {};
 
-  const std::string kDelimChars = "@|_#/:,;";
+  const std::string kDelimChars = "@|_#/:,;-\t\x1d\x1e\x1f";
   std::set<char> found_delims;
   for (char d : kDelimChars) {
     bool consistent = true;
@@ -989,15 +1380,19 @@ GenerationResult generate(const Project& project) {
   std::size_t index = 0;
   for (const auto& s : project.positives) {
     ++index;
-    std::string t = trim(s);
-    if (t != s) {
+    std::string trimmed = trim(s);
+    std::string t = normalize_control_chars(trimmed);
+    if (trimmed != s) {
       result.warnings.push_back("正例 " + std::to_string(index) + " 首尾有空白，已自动去除");
     }
     if (!t.empty()) cleaned.push_back(t);
   }
   if (cleaned.empty()) return result;
 
-  const auto& cfg = project.segment_config;
+  auto cfg = project.segment_config;
+  for (auto& sep : cfg.separators) {
+    sep = normalize_control_chars(trim(sep));
+  }
 
   if (cfg.use_separators && cfg.separators.size() == 1) {
     const std::string& sep = cfg.separators[0];
@@ -1018,35 +1413,96 @@ GenerationResult generate(const Project& project) {
     }
   }
 
+  bool has_aim_id = false;
+  std::string aim_prefix;
+  if (cleaned[0].size() >= 3 && cleaned[0][0] == ']' &&
+      std::isalnum(static_cast<unsigned char>(cleaned[0][1])) &&
+      std::isalnum(static_cast<unsigned char>(cleaned[0][2]))) {
+    aim_prefix = cleaned[0].substr(0, 3);
+    has_aim_id = true;
+    for (const auto& s : cleaned) {
+      if (s.size() < 3 || s.substr(0, 3) != aim_prefix) {
+        has_aim_id = false;
+        break;
+      }
+    }
+  }
+
   // 1. Build the Smart Semantic Segment Model
   std::vector<SegmentRule> smart_segments;
-  if (cfg.use_separators && !cfg.separators.empty()) {
-    smart_segments = segment_by_separators(cleaned, cfg.separators, true, result.warnings);
-    if (smart_segments.empty()) smart_segments = segment_positives_semantic(cleaned);
-  } else if (cfg.use_lengths && !cfg.lengths.empty()) {
-    smart_segments = segment_by_lengths(cleaned, cfg.lengths, true, result.warnings);
-    name_fields_from_preceding_literals(smart_segments);
+  std::vector<SegmentRule> full_aim_segments;
+
+  if (has_aim_id) {
+    std::vector<std::string> stripped_positives;
+    for (const auto& s : cleaned) stripped_positives.push_back(s.substr(3));
+
+    if (cfg.use_separators && !cfg.separators.empty()) {
+      smart_segments = segment_by_separators(stripped_positives, cfg.separators, true, result.warnings);
+      if (smart_segments.empty()) smart_segments = segment_positives_semantic(stripped_positives);
+    } else if (cfg.use_lengths && !cfg.lengths.empty()) {
+      smart_segments = segment_by_lengths(stripped_positives, cfg.lengths, true, result.warnings);
+      name_fields_from_preceding_literals(smart_segments);
+    } else {
+      smart_segments = segment_positives_semantic(stripped_positives);
+    }
+    apply_promotes(smart_segments, cfg.promote_tags);
+    smart_segments = normalize_segments(std::move(smart_segments));
+    apply_overrides(smart_segments, cfg.field_overrides);
+
+    SegmentRule aim_seg;
+    aim_seg.is_literal = true;
+    aim_seg.literal = aim_prefix;
+    full_aim_segments.push_back(std::move(aim_seg));
+    for (const auto& seg : smart_segments) {
+      full_aim_segments.push_back(seg);
+    }
   } else {
-    smart_segments = segment_positives_semantic(cleaned);
+    if (cfg.use_separators && !cfg.separators.empty()) {
+      smart_segments = segment_by_separators(cleaned, cfg.separators, true, result.warnings);
+      if (smart_segments.empty()) smart_segments = segment_positives_semantic(cleaned);
+    } else if (cfg.use_lengths && !cfg.lengths.empty()) {
+      smart_segments = segment_by_lengths(cleaned, cfg.lengths, true, result.warnings);
+      name_fields_from_preceding_literals(smart_segments);
+    } else {
+      smart_segments = segment_positives_semantic(cleaned);
+    }
+    apply_promotes(smart_segments, cfg.promote_tags);
+    smart_segments = normalize_segments(std::move(smart_segments));
+    apply_overrides(smart_segments, cfg.field_overrides);
   }
-  apply_promotes(smart_segments, cfg.promote_tags);
-  smart_segments = normalize_segments(std::move(smart_segments));
-  apply_overrides(smart_segments, cfg.field_overrides);
 
   // 2. Build the Strict Exact Positional Segment Model
   std::vector<SegmentRule> exact_segments;
-  if (cfg.use_separators && !cfg.separators.empty()) {
-    exact_segments = segment_by_separators(cleaned, cfg.separators, false, result.warnings);
-    if (exact_segments.empty()) exact_segments = segment_positives_exact(cleaned);
-  } else if (cfg.use_lengths && !cfg.lengths.empty()) {
-    exact_segments = segment_by_lengths(cleaned, cfg.lengths, false, result.warnings);
-    name_fields_from_preceding_literals(exact_segments);
+  if (has_aim_id) {
+    std::vector<std::string> stripped_positives;
+    for (const auto& s : cleaned) stripped_positives.push_back(s.substr(3));
+
+    if (cfg.use_separators && !cfg.separators.empty()) {
+      exact_segments = segment_by_separators(stripped_positives, cfg.separators, false, result.warnings);
+      if (exact_segments.empty()) exact_segments = segment_positives_exact(stripped_positives);
+    } else if (cfg.use_lengths && !cfg.lengths.empty()) {
+      exact_segments = segment_by_lengths(stripped_positives, cfg.lengths, false, result.warnings);
+      name_fields_from_preceding_literals(exact_segments);
+    } else {
+      exact_segments = segment_positives_exact(stripped_positives);
+    }
+    apply_promotes(exact_segments, cfg.promote_tags);
+    exact_segments = normalize_segments(std::move(exact_segments));
+    apply_overrides(exact_segments, cfg.field_overrides);
   } else {
-    exact_segments = segment_positives_exact(cleaned);
+    if (cfg.use_separators && !cfg.separators.empty()) {
+      exact_segments = segment_by_separators(cleaned, cfg.separators, false, result.warnings);
+      if (exact_segments.empty()) exact_segments = segment_positives_exact(cleaned);
+    } else if (cfg.use_lengths && !cfg.lengths.empty()) {
+      exact_segments = segment_by_lengths(cleaned, cfg.lengths, false, result.warnings);
+      name_fields_from_preceding_literals(exact_segments);
+    } else {
+      exact_segments = segment_positives_exact(cleaned);
+    }
+    apply_promotes(exact_segments, cfg.promote_tags);
+    exact_segments = normalize_segments(std::move(exact_segments));
+    apply_overrides(exact_segments, cfg.field_overrides);
   }
-  apply_promotes(exact_segments, cfg.promote_tags);
-  exact_segments = normalize_segments(std::move(exact_segments));
-  apply_overrides(exact_segments, cfg.field_overrides);
 
   struct TierDef {
     std::string variant;
@@ -1057,18 +1513,62 @@ GenerationResult generate(const Project& project) {
   };
 
   std::vector<TierDef> tiers;
-  tiers.push_back({"smart", "智能业务推荐", smart_segments, false, false});
-  tiers.push_back({"relaxed", "弹性变长扩展", smart_segments, true, false});
-  tiers.push_back({"broadened", "字符集放宽", smart_segments, false, true});
-  tiers.push_back({"exact", "样本严格拟合", exact_segments, false, false});
+  if (has_aim_id) {
+    tiers.push_back({"aim_stripped", "业务载荷推荐（剥离 AIM 码制前缀）", smart_segments, false, false});
+    tiers.push_back({"aim_full", "全链路路由（保留 AIM 码制前缀）", full_aim_segments, false, false});
+    tiers.push_back({"relaxed", "弹性变长扩展", full_aim_segments, true, false});
+    tiers.push_back({"exact", "样本严格拟合", exact_segments, false, false});
+  } else {
+    tiers.push_back({"smart", "智能业务推荐", smart_segments, false, false});
+    tiers.push_back({"relaxed", "弹性变长扩展", smart_segments, true, false});
+    tiers.push_back({"broadened", "字符集放宽", smart_segments, false, true});
+    tiers.push_back({"exact", "样本严格拟合", exact_segments, false, false});
+  }
+
+  bool all_pure_digits = true;
+  std::size_t common_len = cleaned[0].size();
+  for (const auto& s : cleaned) {
+    if (s.size() != common_len) common_len = 0;
+    for (char c : s) {
+      if (!std::isdigit(static_cast<unsigned char>(c))) {
+        all_pure_digits = false;
+        break;
+      }
+    }
+    if (!all_pure_digits) break;
+  }
+
+  if (all_pure_digits && common_len > 0) {
+    if (common_len == 13) {
+      result.warnings.push_back("检测到标准 EAN-13 格式条码（13位纯数字）。末位为 Modulo 10 加权校验码（权值 1,3 轮换），属于业务逻辑计算层。正则表达式负责格式与长度校验，校验位计算建议在上位机业务代码中进行。");
+    } else if (common_len == 12) {
+      result.warnings.push_back("检测到标准 UPC-A 格式条码（12位纯数字）。末位为 Modulo 10 加权校验码（权值 3,1 轮换），属于业务逻辑计算层。校验位计算建议在上位机业务代码中进行。");
+    } else if (common_len == 8) {
+      result.warnings.push_back("检测到标准 EAN-8 格式条码（8位纯数字）。末位为 Modulo 10 加权校验码，属于业务逻辑计算层。校验位计算建议在上位机业务代码中进行。");
+    } else if (common_len == 14) {
+      result.warnings.push_back("检测到标准 ITF-14 格式条码（14位纯数字）。末位为 Modulo 10 加权校验码，属于业务逻辑计算层。校验位计算建议在上位机业务代码中进行。");
+    }
+  }
 
   auto fill_verdicts = [&](CandidateVerdict& vd) {
     for (const auto& s : cleaned) {
       vd.positive_verdicts.push_back(walk_verify(vd.candidate, s));
     }
     for (const auto& s : project.negatives) {
-      auto v = walk_verify(vd.candidate, s);
+      std::string norm_neg = normalize_control_chars(trim(s));
+      auto v = walk_verify(vd.candidate, norm_neg);
+      v.example = s;
       v.passed = !v.matched;
+      if (v.matched && all_pure_digits && common_len > 0 && norm_neg.size() == common_len) {
+        bool neg_pure_digit = true;
+        for (char c : norm_neg) if (!std::isdigit(static_cast<unsigned char>(c))) neg_pure_digit = false;
+        if (neg_pure_digit) {
+          std::string warn_diag = "⚠ 反例 [" + s + "] 格式同为标准 " + std::to_string(common_len) + " 位纯数字，正则无法仅凭字符格式识别校验位数值错误。此类校验位（如 Modulo 10 算法）属于上位机业务层校验职责。";
+          if (std::find(result.warnings.begin(), result.warnings.end(), warn_diag) == result.warnings.end()) {
+            result.warnings.push_back(warn_diag);
+          }
+        }
+      }
       vd.negative_verdicts.push_back(std::move(v));
     }
     std::size_t failures = 0;
@@ -1091,7 +1591,7 @@ GenerationResult generate(const Project& project) {
     if (td.relax_lengths || td.broaden_charsets) {
       for (auto& seg : cand.segments) {
         if (seg.is_literal) continue;
-        if (td.relax_lengths && seg.field.min_len == seg.field.max_len) {
+        if (td.relax_lengths) {
           seg.field.max_len = SIZE_MAX;
         }
         if (td.broaden_charsets) {

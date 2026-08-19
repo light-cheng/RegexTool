@@ -96,7 +96,7 @@ ExampleVerdict verify_example(const Candidate& candidate, const std::string& exa
 // immediately followed by digits, e.g. "@DT2026@LT" -> {"DT"}.
 std::vector<std::string> promotable_tags(const std::string& literal);
 
-// Auto-detect consistent delimiters (e.g. "@", "|", "-") and alphanumeric markers (e.g. "1P", "NQ", "3N") from positive examples.
+// Auto-detect consistent delimiters (e.g. "@", "|", "-", GS) and alphanumeric DI markers (e.g. "1P", "Q", "1T", "S") from positive examples.
 std::vector<std::string> detect_separators(const std::vector<std::string>& positives);
 
 // Compose anchored non-capturing regex.
@@ -107,6 +107,15 @@ std::string compose_capturing_regex(const std::vector<SegmentRule>& segments);
 
 // Utility: trim leading and trailing whitespace (\r, \n, \t, space).
 std::string trim(const std::string& s);
+
+// Utility: normalize control character representations (<GS>, [GS], \x1D, etc.) to binary bytes.
+std::string normalize_control_chars(const std::string& s);
+
+// Utility: visualize control characters (0x1D, 0x1E, 0x04) to human-readable badges ([GS], [RS], [EOT]).
+std::string visualize_control_chars(const std::string& s);
+
+// Returns business standard description for industrial DI or GS1 AI (e.g. "1P" -> "PartNumber", "Q" -> "Quantity").
+std::string get_business_field_description(const std::string& field_name);
 
 // Utility: test whether a character matches a charset fragment (e.g. \d, [A-Z], [0-9A-F]).
 bool charset_matches(const std::string& frag, char c);

@@ -36,6 +36,7 @@ void check_eq_impl(const char* file, int line, const char* a_str, const char* b_
   if (!(a == b)) {
     std::printf("FAIL %s:%d: %s == %s [actual: %s, expected: %s]\n",
                 file, line, a_str, b_str, format_val(a).c_str(), format_val(b).c_str());
+    std::fflush(stdout);
     ++g_failures;
   }
 }
@@ -45,6 +46,7 @@ void check_ne_impl(const char* file, int line, const char* a_str, const char* b_
   if (!(a != b)) {
     std::printf("FAIL %s:%d: %s != %s [both are: %s]\n",
                 file, line, a_str, b_str, format_val(a).c_str());
+    std::fflush(stdout);
     ++g_failures;
   }
 }
@@ -53,6 +55,7 @@ void check_ne_impl(const char* file, int line, const char* a_str, const char* b_
   do {                                                                    \
     if (!(cond)) {                                                        \
       std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);         \
+      std::fflush(stdout);                                                \
       ++g_failures;                                                       \
     }                                                                     \
   } while (0)
@@ -748,9 +751,380 @@ void test_custom_sequential_markers_european() {
   CHECK_EQ(first_regex(result), std::string("^1P\\d{6}NQ\\d{6}3N\\d{4}$"));
 }
 
+void test_asc_mh10_data_identifier_concatenation() {
+  // ASC MH10 DI prefixes: 1P (PN), Q (Quantity), 1T (Lot), S (Serial)
+  auto result = regex_tool::generate({
+      "1P12345678Q1001TA1B2C3D4S98765",
+      "1P87654321Q5001T12345678S12345",
+      "1P11223344Q0501TABCDEFGHS67890",
+  });
+  CHECK(result.has_passing);
+  CHECK_EQ(first_regex(result), std::string("^1P\\d{8}Q\\d{3}1T[A-Z0-9]{8}S\\d{5}$"));
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  CHECK_EQ(vd.positive_verdicts.size(), 3u);
+  // Check that field names match the DI tags
+  std::vector<std::string> field_names;
+  for (const auto& seg : vd.candidate.segments) {
+    if (!seg.is_literal) field_names.push_back(seg.field.name);
+  }
+  CHECK_EQ(field_names.size(), 4u);
+  CHECK_EQ(field_names[0], std::string("1P"));
+  CHECK_EQ(field_names[1], std::string("Q"));
+  CHECK_EQ(field_names[2], std::string("1T"));
+  CHECK_EQ(field_names[3], std::string("S"));
+}
+
+void test_iso_15434_format_06_with_gs_separator() {
+  // ISO/IEC 15434 Format 06 envelope with Group Separator (GS = \x1D)
+  std::string p1 = std::string("[)>06\x1d") + "1P12345678" + "\x1d" + "Q100" + "\x1d" + "1TLOT2024A" + "\x1d" + "S98765";
+  std::string p2 = std::string("[)>06\x1d") + "1P87654321" + "\x1d" + "Q500" + "\x1d" + "1TLOT2024B" + "\x1d" + "S12345";
+  auto result = regex_tool::generate({p1, p2});
+  CHECK(result.has_passing);
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+
+  // Also verify explicit separator resolution with "GS" or "\x1d"
+  regex_tool::Project proj;
+  proj.positives = {p1, p2};
+  proj.segment_config.use_separators = true;
+  proj.segment_config.separators = {"GS"};
+  auto res_gs = regex_tool::generate(proj);
+  CHECK(res_gs.has_passing);
+  CHECK(res_gs.candidates.front().passes_all);
+}
+
+void test_user_exact_barcode_scenario() {
+  std::vector<std::string> positives = {
+      "[)>[RS]06[GS]1PMX-90021-B[GS]3SBX26081802[GS]1TLOT2026A[GS]Q1500[GS]D260818[GS]V12883[RS][EOT]",
+      "[)>[RS]06[GS]1PMX-88103-A[GS]3SBX26081803[GS]1TLOT2026B[GS]Q2000[GS]D260819[GS]V99412[RS][EOT]",
+  };
+
+  // 1. Fully automatic generation
+  auto auto_res = regex_tool::generate(positives);
+  CHECK(auto_res.has_passing);
+  const auto& auto_vd = auto_res.candidates.front();
+  CHECK(auto_vd.passes_all);
+
+  // 2. Explicitly setting DI markers: 1P, 3S, 1T, Q, D, V
+  regex_tool::Project proj_di;
+  proj_di.positives = positives;
+  proj_di.segment_config.use_separators = true;
+  proj_di.segment_config.separators = {"1P", "3S", "1T", "Q", "D", "V"};
+  auto res_di = regex_tool::generate(proj_di);
+  CHECK(res_di.has_passing);
+  CHECK(res_di.candidates.front().passes_all);
+
+  // 3. Explicitly setting [GS] separator
+  regex_tool::Project proj_gs;
+  proj_gs.positives = positives;
+  proj_gs.segment_config.use_separators = true;
+  proj_gs.segment_config.separators = {"[GS]"};
+  auto res_gs = regex_tool::generate(proj_gs);
+  CHECK(res_gs.has_passing);
+  CHECK(res_gs.candidates.front().passes_all);
+}
+
+void test_user_di_negative_examples_scenario() {
+  regex_tool::Project proj;
+  proj.positives = {
+      "1PMX-90021-B@3SBX26081801@1TLOT2026A@Q3000@D260818@V12883",
+      "1PMX-90021-B@3SBX26081802@1TLOT2026A@Q1500@D260818@V12883",
+      "1PMX-90021-B@3SBX26081901@1TLOT2026B@Q0500@D260819@V12883",
+  };
+  proj.negatives = {
+      // 1. Extra colon/space
+      "1P:MX-90021-B@3S:BX26081801@1T:LOT2026A@Q:3000@D:260818@V:12883",
+      // 2. Missing DI prefix
+      "MX-90021-B@BX26081801@LOT2026A@3000@260818@12883",
+      // 3. Prefix typo/overlap
+      "PMX-90021-B@SBX26081801@TLOT2026A@Q3000@D260818@V12883",
+      // 4. ISO 15434 header residual
+      "[)>06@1PMX-90021-B@3SBX26081801@1TLOT2026A@Q3000@D260818@V12883",
+  };
+
+  auto result = regex_tool::generate(proj);
+  CHECK(result.has_passing);
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  CHECK_EQ(vd.positive_verdicts.size(), 3u);
+  CHECK_EQ(vd.negative_verdicts.size(), 4u);
+  for (const auto& pv : vd.positive_verdicts) {
+    CHECK(pv.passed);
+  }
+  for (const auto& nv : vd.negative_verdicts) {
+    CHECK(nv.passed);    // Passed negative verdict means regex correctly REJECTED it
+    CHECK(!nv.matched);  // Did not match
+  }
+}
+
+void test_pure_digits_variable_length_anti_overfitting() {
+  auto result = regex_tool::generate({"1001", "10002", "100003", "1000004"});
+  CHECK(result.has_passing);
+  CHECK_EQ(first_regex(result), std::string("^\\d{4,7}$"));
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  for (const auto& v : vd.positive_verdicts) {
+    CHECK(v.passed);
+  }
+
+  // Check relaxed candidate exists and has {4,} or +
+  bool found_relaxed = false;
+  for (const auto& cv : result.candidates) {
+    if (cv.candidate.variant == "relaxed" || cv.candidate.regex == "^\\d{4,}$" || cv.candidate.regex == "^\\d+$") {
+      found_relaxed = true;
+      break;
+    }
+  }
+  CHECK(found_relaxed);
+}
+
+void test_tag_with_variable_length_digits() {
+  auto result = regex_tool::generate({"SN1001", "SN10002", "SN100003"});
+  CHECK(result.has_passing);
+  CHECK_EQ(first_regex(result), std::string("^SN\\d{4,6}$"));
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  CHECK_EQ(vd.candidate.segments.size(), 2u);
+  if (vd.candidate.segments.size() >= 2u) {
+    CHECK(vd.candidate.segments[0].is_literal);
+    CHECK_EQ(vd.candidate.segments[0].literal, "SN");
+    CHECK(!vd.candidate.segments[1].is_literal);
+    CHECK_EQ(vd.candidate.segments[1].field.name, "SN");
+    CHECK_EQ(vd.candidate.segments[1].field.min_len, 4u);
+    CHECK_EQ(vd.candidate.segments[1].field.max_len, 6u);
+  }
+  CHECK_EQ(vd.positive_verdicts.size(), 3u);
+  if (vd.positive_verdicts.size() == 3u) {
+    CHECK_EQ(vd.positive_verdicts[0].field_captures[0].second, "1001");
+    CHECK_EQ(vd.positive_verdicts[1].field_captures[0].second, "10002");
+    CHECK_EQ(vd.positive_verdicts[2].field_captures[0].second, "100003");
+  }
+}
+
+void test_middle_coincidental_char_anti_overfitting() {
+  auto result = regex_tool::generate({"201", "3002", "40003"});
+  CHECK(result.has_passing);
+  CHECK_EQ(first_regex(result), std::string("^\\d{3,5}$"));
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+}
+
+void test_variable_length_with_delimiters() {
+  auto result = regex_tool::generate({
+      "PN8821@SQ1001@WK12",
+      "PN4503@SQ10002@WK15",
+      "PN1192@SQ100003@WK08",
+  });
+  CHECK(result.has_passing);
+  CHECK_EQ(first_regex(result), std::string("^PN\\d{4}@SQ\\d{4,6}@WK\\d{2}$"));
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  CHECK_EQ(vd.positive_verdicts.size(), 3u);
+  if (vd.positive_verdicts.size() == 3u) {
+    CHECK_EQ(vd.positive_verdicts[0].field_captures[1].second, "1001");
+    CHECK_EQ(vd.positive_verdicts[1].field_captures[1].second, "10002");
+    CHECK_EQ(vd.positive_verdicts[2].field_captures[1].second, "100003");
+  }
+}
+
+void test_real_iso_15434_raw_control_bytes_and_negatives() {
+  regex_tool::Project proj;
+  proj.positives = {
+      std::string("[)>\x1E" "06\x1D") + "1PA10402" + "\x1D" + "Q1000" + "\x1D" + "S00891\x1E\x04",
+      std::string("[)>\x1E" "06\x1D") + "1PB20500" + "\x1D" + "Q2500" + "\x1D" + "S00992\x1E\x04",
+  };
+  // Negative missing the \x1D between 1P and Q
+  proj.negatives = {
+      std::string("[)>\x1E" "06\x1D") + "1PA10402" + "Q1000" + "\x1D" + "S00891\x1E\x04",
+  };
+
+  auto result = regex_tool::generate(proj);
+  CHECK(result.has_passing);
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+  CHECK(first_regex(result).find("\x1D") == std::string::npos); // Regex must escape control characters
+  CHECK(first_regex(result).find("\\x1D") != std::string::npos || first_regex(result).find("\\x1d") != std::string::npos);
+  CHECK(first_regex(result).find("\\x1E") != std::string::npos || first_regex(result).find("\\x1e") != std::string::npos);
+  CHECK(first_regex(result).find("\\x04") != std::string::npos);
+
+  CHECK_EQ(vd.negative_verdicts.size(), 1u);
+  if (!vd.negative_verdicts.empty()) {
+    CHECK(vd.negative_verdicts[0].passed);
+    CHECK(!vd.negative_verdicts[0].matched);
+    CHECK_NE(vd.negative_verdicts[0].failing_segment, SIZE_MAX);
+  }
+}
+
+void test_visualized_escape_text_normalization() {
+  regex_tool::Project proj;
+  proj.positives = {
+      "[)>06<GS>1PA10402<GS>Q1000<GS>S00891<RS><EOT>",
+      "[)>06<GS>1PB20500<GS>Q2500<GS>S00992<RS><EOT>",
+  };
+
+  auto result = regex_tool::generate(proj);
+  CHECK(result.has_passing);
+  const auto& vd = result.candidates.front();
+  CHECK(vd.passes_all);
+
+  // Self-test with raw binary string against candidate generated from text escapes
+  std::string raw_test = std::string("[)>06\x1d") + "1PA10402" + "\x1d" + "Q1000" + "\x1d" + "S00891" + "\x1e\x04";
+  auto v1 = regex_tool::verify_example(vd.candidate, raw_test);
+  CHECK(v1.passed);
+  CHECK(v1.matched);
+
+  // Self-test with visualized string
+  auto v2 = regex_tool::verify_example(vd.candidate, "[)>06<GS>1PA10402<GS>Q1000<GS>S00891<RS><EOT>");
+  CHECK(v2.passed);
+  CHECK(v2.matched);
+
+  // Check utility functions
+  CHECK_EQ(regex_tool::normalize_control_chars("<GS><RS><EOT><US>"), std::string("\x1D\x1E\x04\x1F"));
+  CHECK_EQ(regex_tool::visualize_control_chars("\x1D\x1E\x04\x1F"), std::string("[GS][RS][EOT][US]"));
+}
+
+void test_aim_id_detection_and_dual_variants() {
+  // Data Matrix ECC 200 with AIM ID ]d1
+  regex_tool::Project proj_dm;
+  proj_dm.positives = {
+      "]d11PA10402@Q1000@S00891",
+      "]d11PB20500@Q2500@S00992",
+  };
+  proj_dm.negatives = {
+      "]d11PA10402@Q-BAD@S00891",
+  };
+
+  auto res_dm = regex_tool::generate(proj_dm);
+  CHECK(res_dm.has_passing);
+  CHECK(res_dm.candidates.size() >= 2u);
+
+  bool found_stripped = false, found_full = false;
+  for (const auto& cv : res_dm.candidates) {
+    if (cv.candidate.variant == "aim_stripped") {
+      found_stripped = true;
+      CHECK(cv.passes_all);
+      CHECK(cv.candidate.regex.rfind("1P", 0) != std::string::npos || cv.candidate.regex.rfind("^1P", 0) != std::string::npos);
+    }
+    if (cv.candidate.variant == "aim_full") {
+      found_full = true;
+      CHECK(cv.passes_all);
+      CHECK(cv.candidate.regex.rfind("^\\]d1", 0) != std::string::npos);
+    }
+  }
+  CHECK(found_stripped);
+  CHECK(found_full);
+
+  // GS1-128 with AIM ID ]C1
+  auto res_c1 = regex_tool::generate({"]C10101234567890128", "]C10109876543210987"});
+  CHECK(res_c1.has_passing);
+  CHECK(first_regex(res_c1) == "^\\d{16}$" || first_regex(res_c1) == "^\\]C1\\d{16}$" || first_regex(res_c1) == "^01\\d{14}$" || first_regex(res_c1) == "^\\]C101\\d{14}$");
+
+  // QR Code with AIM ID ]Q1
+  auto res_q1 = regex_tool::generate({"]Q1URL123", "]Q1URL456"});
+  CHECK(res_q1.has_passing);
+}
+
+void test_industrial_di_vda_and_aerospace() {
+  // Automotive VDA 4994: 1J (PackageID), 3J (InnerPackageID), 5J (MixedPackageID)
+  auto res_vda = regex_tool::generate({
+      "1JMAT10402@3JIN2001@5JMX901",
+      "1JMAT20500@3JIN5002@5JMX902",
+  });
+  CHECK(res_vda.has_passing);
+  CHECK_EQ(first_regex(res_vda), std::string("^1JMAT\\d{5}@3JIN\\d{4}@5JMX\\d{3}$"));
+
+  // Aerospace ATA 2000 / MIL-STD-130: 17V (Manufacturer), 1S (Serial), 30P (PartRev), 30Q (Qty)
+  auto res_ata = regex_tool::generate({
+      "17VCAGE01@1SSN9001@30PREVA@30QQTY10",
+      "17VCAGE02@1SSN9002@30PREVB@30QQTY20",
+  });
+  CHECK(res_ata.has_passing);
+  CHECK_EQ(first_regex(res_ata), std::string("^17VCAGE\\d{2}@1SSN\\d{4}@30PREV[A-Z]@30QQTY\\d{2}$"));
+}
+
+void test_gs1_application_identifiers_parenthesized() {
+  // GS1 AI standard with human-readable parentheses: (01) GTIN, (10) Batch, (17) ExpDate, (21) Serial
+  auto res_gs1 = regex_tool::generate({
+      "(01)01234567890128(10)LOT2026A(17)261231(21)SN1001",
+      "(01)01234567890128(10)LOT2026B(17)261231(21)SN1002",
+  });
+  CHECK(res_gs1.has_passing);
+  CHECK_EQ(first_regex(res_gs1), std::string("^\\(01\\)01234567890128\\(10\\)LOT2026[A-Z]\\(17\\)261231\\(21\\)SN\\d{4}$"));
+}
+
+void test_business_field_description_dictionary() {
+  CHECK_EQ(regex_tool::get_business_field_description("1P"), std::string("PartNumber"));
+  CHECK_EQ(regex_tool::get_business_field_description("Q"), std::string("Quantity"));
+  CHECK_EQ(regex_tool::get_business_field_description("S"), std::string("SerialNumber"));
+  CHECK_EQ(regex_tool::get_business_field_description("1T"), std::string("TraceabilityLot"));
+  CHECK_EQ(regex_tool::get_business_field_description("17V"), std::string("ManufacturerCode"));
+  CHECK_EQ(regex_tool::get_business_field_description("1J"), std::string("PackageID"));
+  CHECK_EQ(regex_tool::get_business_field_description("01"), std::string("GTIN"));
+  CHECK_EQ(regex_tool::get_business_field_description("(01)"), std::string("GTIN"));
+}
+
+void test_ean13_symbology_recognition_and_checksum_advisory() {
+  regex_tool::Project proj;
+  proj.positives = {"6901234567895", "6909876543212"};
+  proj.negatives = {"6901234567890"}; // Same length and digit format, wrong check digit
+
+  auto result = regex_tool::generate(proj);
+  CHECK_EQ(first_regex(result), std::string("^\\d{13}$"));
+
+  bool found_ean_warn = false, found_checksum_diag = false;
+  for (const auto& w : result.warnings) {
+    if (w.find("EAN-13") != std::string::npos && w.find("Modulo 10") != std::string::npos) {
+      found_ean_warn = true;
+    }
+    if (w.find("无法仅凭字符格式识别校验位数值错误") != std::string::npos) {
+      found_checksum_diag = true;
+    }
+  }
+  CHECK(found_ean_warn);
+  CHECK(found_checksum_diag);
+}
+
+void test_upca_symbology_recognition_and_advisory() {
+  auto result = regex_tool::generate({"012345678905", "098765432108"});
+  CHECK_EQ(first_regex(result), std::string("^\\d{12}$"));
+  bool found_upc = false;
+  for (const auto& w : result.warnings) {
+    if (w.find("UPC-A") != std::string::npos) found_upc = true;
+  }
+  CHECK(found_upc);
+}
+
+void test_itf14_symbology_recognition() {
+  auto result = regex_tool::generate({"10012345678902", "20012345678909"});
+  CHECK_EQ(first_regex(result), std::string("^\\d{14}$"));
+  bool found_itf = false;
+  for (const auto& w : result.warnings) {
+    if (w.find("ITF-14") != std::string::npos) found_itf = true;
+  }
+  CHECK(found_itf);
+}
+
 }  // namespace
 
 int main() {
+  test_ean13_symbology_recognition_and_checksum_advisory();
+  test_upca_symbology_recognition_and_advisory();
+  test_itf14_symbology_recognition();
+  test_business_field_description_dictionary();
+  test_industrial_di_vda_and_aerospace();
+  test_gs1_application_identifiers_parenthesized();
+  test_aim_id_detection_and_dual_variants();
+  test_real_iso_15434_raw_control_bytes_and_negatives();
+  test_visualized_escape_text_normalization();
+  test_pure_digits_variable_length_anti_overfitting();
+  test_tag_with_variable_length_digits();
+  test_middle_coincidental_char_anti_overfitting();
+  test_variable_length_with_delimiters();
+  test_user_di_negative_examples_scenario();
+  test_user_exact_barcode_scenario();
+  test_asc_mh10_data_identifier_concatenation();
+  test_iso_15434_format_06_with_gs_separator();
   test_user_separator_trailing_delimiter_scenario();
   test_custom_sequential_markers_european();
   test_user_reported_barcode_scenario();
