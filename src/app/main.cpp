@@ -789,7 +789,6 @@ void capture_wizard_background(AppState* g) {
   if (g->wizard_overlay) {
     ShowWindow(g->wizard_overlay, SW_HIDE);
   }
-  RedrawWindow(g->main_hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
 
   RECT rc;
   GetClientRect(g->main_hwnd, &rc);
@@ -797,21 +796,31 @@ void capture_wizard_background(AppState* g) {
   int win_h = rc.bottom;
   if (win_w <= 0 || win_h <= 0) return;
 
-  POINT pt{ 0, 0 };
-  ClientToScreen(g->main_hwnd, &pt);
+  HDC hdc_win = GetDC(g->main_hwnd);
+  if (!hdc_win) return;
 
-  HDC screen_dc = GetDC(nullptr);
   if (!g->wizard_bg_dc) {
-    g->wizard_bg_dc = CreateCompatibleDC(screen_dc);
+    g->wizard_bg_dc = CreateCompatibleDC(hdc_win);
   }
   if (g->wizard_bg_bitmap) {
     DeleteObject(g->wizard_bg_bitmap);
     g->wizard_bg_bitmap = nullptr;
   }
-  g->wizard_bg_bitmap = CreateCompatibleBitmap(screen_dc, win_w, win_h);
+  g->wizard_bg_bitmap = CreateCompatibleBitmap(hdc_win, win_w, win_h);
   SelectObject(g->wizard_bg_dc, g->wizard_bg_bitmap);
-  BitBlt(g->wizard_bg_dc, 0, 0, win_w, win_h, screen_dc, pt.x, pt.y, SRCCOPY);
-  ReleaseDC(nullptr, screen_dc);
+
+  // 1. Fill solid background color (guarantees no transparent leaks or desktop pixels ever)
+  HBRUSH bg_brush = CreateSolidBrush(RGB(243, 243, 243));
+  FillRect(g->wizard_bg_dc, &rc, bg_brush);
+  DeleteObject(bg_brush);
+
+  // 2. Render main window and all child controls into wizard_bg_dc directly from window tree
+  if (!PrintWindow(g->main_hwnd, g->wizard_bg_dc, 2 /* PW_CLIENTONLY */)) {
+    SendMessageW(g->main_hwnd, WM_PRINT, reinterpret_cast<WPARAM>(g->wizard_bg_dc),
+                 PRF_CLIENT | PRF_CHILDREN | PRF_OWNED | PRF_ERASEBKGND);
+  }
+
+  ReleaseDC(g->main_hwnd, hdc_win);
 }
 
 // Wizard Overlay Window Procedure
@@ -2566,6 +2575,9 @@ void layout(HWND hwnd) {
   if (g->wizard_overlay) {
     MoveWindow(g->wizard_overlay, 0, 0, win_w, win_h, TRUE);
     if (g->wizard_active) {
+      capture_wizard_background(g);
+      ShowWindow(g->wizard_overlay, SW_SHOW);
+      BringWindowToTop(g->wizard_overlay);
       InvalidateRect(g->wizard_overlay, nullptr, TRUE);
     }
   }
@@ -2799,6 +2811,15 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_SIZE:
       layout(hwnd);
+      return 0;
+
+    case WM_ACTIVATE:
+      if (LOWORD(wParam) != WA_INACTIVE && g && g->wizard_active && g->wizard_overlay) {
+        capture_wizard_background(g);
+        ShowWindow(g->wizard_overlay, SW_SHOW);
+        BringWindowToTop(g->wizard_overlay);
+        InvalidateRect(g->wizard_overlay, nullptr, TRUE);
+      }
       return 0;
 
     case WM_SETTINGCHANGE:
