@@ -1,5 +1,26 @@
-# Build artifacts
+# Build artifacts & Binaries
 build/
+bin/
+*.exe
+*.obj
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.log
 
-# Tooling state
+# IDE & Visual Studio / VSCode
+.vs/
+.vscode/
+*.vcxproj.user
+*.sln.docstates
+
+# Tooling state & Runtime configs
 .freebuff/
+config.ini
+*.ini
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
